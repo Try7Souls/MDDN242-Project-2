@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Creature — MDDN242</title>
+    <link rel="icon" id="favicon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'><text y='32' font-size='32'>👾</text></svg>">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&family=Lora:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+
+    <!-- ════════════════════ SIDEBAR ════════════════════ -->
+    <div class="sidebar">
+
+        <div class="hour-display">
+            <span class="hour-num" id="ui-hour">--</span><span class="hour-period" id="ui-period">--</span>
+        </div>
+
+        <div class="state-card">
+            <div class="state-card-label">state</div>
+            <div class="state-card-value" id="ui-state">neutral</div>
+            <div class="state-card-desc" id="ui-desc">need is rising — slightly transparent</div>
+            <div class="need-wrap">
+                <div class="need-track">
+                    <div class="need-fill" id="ui-need-bar" style="width:50%"></div>
+                </div>
+                <div class="need-labels">
+                    <span>need: <b id="ui-need-val">50</b></span>
+                </div>
+            </div>
+        </div>
+        <!-- ── Stats ── -->
+        <div class="stats-row">
+            <div class="stat-pill">
+                <span class="s-label">visits</span>
+                <span class="s-val" id="ui-visits">1</span>
+            </div>
+            <div class="stat-pill">
+                <span class="s-label">mic</span>
+                <span class="s-val" id="ui-mic">—</span>
+            </div>
+            <div class="stat-pill">
+                <span class="s-label">excited</span>
+                <span class="s-val" id="ui-excited">no</span>
+            </div>
+            <div class="stat-pill">
+                <span class="s-label">focus</span>
+                <span class="s-val" id="ui-watched">on</span>
+            </div>
+        </div>
+
+
+        <hr class="divider">
+
+        <!-- ── Influence ── -->
+        <div class="control-section">
+            <h3>Influence</h3>
+            <ul class="hint-list">
+                <li><span class="key">click</span> Click the creature to feed it (−need)</li>
+                <li><span class="key">tab away</span> Need rises faster when unwatched</li>
+                <li><span class="key">loud noise</span> Triggers excited state (click first to allow mic)</li>
+                <li><span class="key">time away</span> AFK need builds up over hours</li>
+            </ul>
+        </div>
+
+        <hr class="divider">
+
+        <!-- ── Behaviour settings ── -->
+        <div class="control-section">
+            <h3>Behaviour</h3>
+
+            <div class="control-group">
+                <label>Need decay rate</label>
+                <div class="slider-row">
+                    <input type="range" id="sl-decay" min="0.001" max="0.045" step="0.001" value="0.003"
+                        oninput="window._setDecay && window._setDecay(+this.value); document.getElementById('dv-decay').textContent = parseFloat(this.value).toFixed(3)">
+                    <span class="val-display" id="dv-decay">0.003</span>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <label>Click feed amount</label>
+                <div class="slider-row">
+                    <input type="range" id="sl-feed" min="5" max="50" step="5" value="20"
+                        oninput="window._setFeed && window._setFeed(+this.value); document.getElementById('dv-feed').textContent = this.value">
+                    <span class="val-display" id="dv-feed">20</span>
+                </div>
+            </div>
+
+        </div>
+
+        <hr class="divider">
+
+        <!-- ── Actions ── -->
+        <div class="control-section">
+            <h3>Actions</h3>
+            <button class="button danger" onclick="window._resetNeed && window._resetNeed()">Reset need to 0</button>
+            <button class="button secondary" onclick="window._maxNeed && window._maxNeed()">Max need (→ distressed)</button>
+        </div>
+    </div>
+
+    <!-- ════════════════════ CANVAS ════════════════════ -->
+    <div class="canvas-area">
+        <div id="canvas-container"></div>
+    </div>
+</div>
+
+<!-- Mobile drawer handle — only visible on small screens -->
+<button class="drawer-handle" id="drawer-handle" onclick="toggleDrawer()" aria-label="Toggle controls">
+    <span class="drawer-pip"></span>
+    <span class="drawer-label" id="drawer-label">controls</span>
+</button>
+
+<script src="sketch.js"></script>
+<script>
+    function toggleDrawer() {
+        const sidebar = document.querySelector('.sidebar');
+        const label   = document.getElementById('drawer-label');
+        const open    = sidebar.classList.toggle('drawer-open');
+        label.textContent = open ? 'close' : 'controls';
+    }
+</script>
+</body>
+</html>
