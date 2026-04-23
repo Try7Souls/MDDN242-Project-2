@@ -1,446 +1,297 @@
-// ============================================================
-//  YOUR CREATURE  —  sketch.js
-//  MDDN242 Project 2
-// ============================================================
-//
-//  QUICK START
-//  1. Edit drawBody() to redesign the shape
-//  2. Edit drawEyes() — or remove the call to drop eyes entirely
-//  3. Add a new state in STATES + one line in getState()
-//  4. Tune the SETTINGS constants at the top
-//  5. Rename "need" to match your concept (hunger, loneliness…)
-//
-// ============================================================
-
-new p5(function(p) {
+new p5(function (p) {
 
     // ============================================================
-    //  SETTINGS  —  tweak these, or use the sidebar sliders
+    // STATE
     // ============================================================
-
-    const SHOW_UI      = true;   // set false to hide the sidebar while designing
-
-    let CREATURE_SIZE  = 210;    // body diameter in pixels
-    let DECAY_RATE     = 0.003;  // need rise per frame while tab is focused
-    let AWAY_RATE      = 0.020;  // need rise per frame while tab is hidden
-    let AFK_PER_HOUR   = 5;      // extra need added per hour since last visit
-    let AFK_MAX_HOURS  = 168;    // cap time-away at 7 days
-    let CLICK_FEED     = 20;     // how much a click reduces need
-    let MIC_THRESHOLD  = 0.15;   // how loud is "loud" (0–1)
-    let EXCITED_FRAMES = 40;     // how long the excited state lasts
-    let BOUNCE_SCALE   = 1.0;    // multiplier for all bounce amounts
-
-    // Colours — also editable via sidebar colour pickers
-    let bgColour   = [220, 242, 210];  // background (r, g, b)
-    let bodyColour = [139,  0,  0];   // body fill  (r, g, b)
-
-
-    // ============================================================
-    //  STATE MACHINE
-    //
-    //  Each state is a row of visual/behaviour targets.
-    //  Add a new state here, then add one condition in getState().
-    // ============================================================
-
-    const STATES = {
-        //            bounce      shake     opacity
-        happy:      { bounceAmt: 0.04, shakeAmt: 0.0, alphaTarget: 255 },
-        neutral:    { bounceAmt: 0.02, shakeAmt: 0.0, alphaTarget: 180 },
-        distressed: { bounceAmt: 0.01, shakeAmt: 1.5, alphaTarget: 127 },
-        excited:    { bounceAmt: 0.10, shakeAmt: 0.0, alphaTarget: 255 },
-    };
-
-    const STATE_DESCRIPTIONS = {
-        happy:      'need is low — bouncy, fully visible',
-        neutral:    'need is rising — slightly transparent',
-        distressed: 'need is high — shaking, 50% transparent',
-        excited:    'heard a sound! — big pupils, roaming',
-    };
-
-    // First match wins — checked top to bottom every frame.
-    function getState(c) {
-        if (c.exciteTimer > 0) return 'excited';
-        if (c.need <= 30)      return 'happy';
-        if (c.need <= 70)      return 'neutral';
-        return 'distressed';
-    }
-
-
-    // ============================================================
-    //  CREATURE FACTORY
-    // ============================================================
-
-    function createCreature(x, y) {
-        return {
-            x, y,
-            need:  50,
-            state: 'neutral',
-            bounceAmt: 0.02,
-            bodyAlpha: 255,
-            originX: x, originY: y,
-            wanderX: 0, wanderY: 0,
-            wanderTargetX: 0, wanderTargetY: 0,
-            wanderChangeTimer: 0,
-            exciteTimer: 0,
-            orbitAngle:  0,
-            breathe: 0,
-            bob:     0,
-            hour:    new Date().getHours(),
-            isWatched: true,
-            micLevel:  0,
-            lastVisit:   null,
-            totalVisits: 0,
-        };
-    }
 
     let creature;
-    let micAnalyser = null;
-    let micActive   = false;
-    let micData     = null;   // reused buffer — allocated once when mic starts
+    let state = "idle";
 
-    // Cached DOM refs — populated in setup, never queried again
-    let ui = {};
+    let chaosTime = 0;
 
+    let stateTimer = 0;
+    let targetTimer = 0;
 
-    // ============================================================
-    //  SETUP
-    // ============================================================
+    let legPhase = 0;
+    let peckPhase = 0;
+    let pecksLeft = 0;
 
-    function isMobile() {
-        return window.innerWidth <= 768;
+    let hunger = 0;
+
+    let dragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+
+    let seed = { x: 0, y: 0 };
+    let draggingSeed = false;
+
+    const PICK_RADIUS = 140;
+
+    function createCreature(x, y) {
+        return { x, y, targetX: x, facing: 1 };
     }
 
-    function canvasSize() {
-        if (isMobile()) {
-            return { w: window.innerWidth, h: window.innerHeight };
-        }
-        return {
-            w: SHOW_UI ? p.windowWidth - 360 : p.windowWidth - 40,
-            h: p.windowHeight - 40,
-        };
+    function resetSeed() {
+        seed.x = p.width - 80;
+        seed.y = p.height - 80;
     }
 
-    p.setup = function() {
-        let sz  = canvasSize();
-        let cnv = p.createCanvas(sz.w, sz.h);
+    // ============================================================
+    // SETUP
+    // ============================================================
+
+    p.setup = function () {
+        let cnv = p.createCanvas(p.windowWidth - 40, p.windowHeight - 40);
         cnv.parent('canvas-container');
-        cnv.mousePressed(onCanvasClick);
 
         creature = createCreature(p.width / 2, p.height / 2);
-        loadState(creature);
-
-        if (!SHOW_UI) document.querySelector('.sidebar').style.display = 'none';
-
-        // Cache sidebar DOM refs once — no per-frame getElementById calls
-        ui.hour    = document.getElementById('ui-hour');
-        ui.period  = document.getElementById('ui-period');
-        ui.state   = document.getElementById('ui-state');
-        ui.desc    = document.getElementById('ui-desc');
-        ui.needVal = document.getElementById('ui-need-val');
-        ui.needBar = document.getElementById('ui-need-bar');
-        ui.visits  = document.getElementById('ui-visits');
-        ui.excited = document.getElementById('ui-excited');
-        ui.watched = document.getElementById('ui-watched');
-        ui.mic     = document.getElementById('ui-mic');
-
-        // Track focus via events — no polling in the draw loop
-        window.addEventListener('focus', () => { creature.isWatched = true; });
-        window.addEventListener('blur',  () => { creature.isWatched = false; });
-
-        setInterval(() => { saveState(creature); creature.hour = new Date().getHours(); }, 30000);
-        window.addEventListener('beforeunload', () => saveState(creature));
+        resetSeed();
+        enterIdle();
     };
 
-
     // ============================================================
-    //  DRAW LOOP
-    // ============================================================
-
-    p.draw = function() {
-        p.background(...bgColour);
-
-        updateMic(creature);
-        updateCreature(creature);
-        drawCreature(creature);
-
-        if (p.frameCount % 6 === 0) updateSidebar(creature); // ~10fps is plenty for UI
-    };
-
-
-    // ============================================================
-    //  CREATURE LOGIC
+    // BEHAVIOUR
     // ============================================================
 
-    function updateCreature(c) {
-        // Need rises over time
-        let rate = c.isWatched ? DECAY_RATE : AWAY_RATE;
-        c.need = p.constrain(c.need + rate, 0, 100);
-
-        // State machine
-        c.state = getState(c);
-        let s = STATES[c.state];
-        c.bounceAmt = p.lerp(c.bounceAmt, s.bounceAmt * BOUNCE_SCALE, 0.08);
-        c.bodyAlpha = p.lerp(c.bodyAlpha, s.alphaTarget, 0.05);
-
-        // Animation phases
-        c.breathe += 0.018;
-        c.bob     += 0.012;
-
-        // Excited: chase mouse (orbit when close), or wander if mouse is off canvas.
-        // Calm: drift back to origin.
-        if (c.exciteTimer > 0) {
-            c.exciteTimer--;
-            let mouseOnCanvas = p.mouseX >= 0 && p.mouseX <= p.width &&
-                                p.mouseY >= 0 && p.mouseY <= p.height;
-            if (mouseOnCanvas) {
-                const ORBIT_RADIUS = CREATURE_SIZE * 0.55;
-                let distToMouse = p.dist(c.x, c.y, p.mouseX, p.mouseY);
-                if (distToMouse > ORBIT_RADIUS * 1.5) {
-                    c.wanderTargetX = p.mouseX - c.originX;
-                    c.wanderTargetY = p.mouseY - c.originY;
-                } else {
-                    c.orbitAngle   += 0.025;
-                    c.wanderTargetX = (p.mouseX - c.originX) + Math.cos(c.orbitAngle) * ORBIT_RADIUS;
-                    c.wanderTargetY = (p.mouseY - c.originY) + Math.sin(c.orbitAngle) * ORBIT_RADIUS;
-                }
-            } else {
-                c.wanderChangeTimer--;
-                if (c.wanderChangeTimer <= 0) {
-                    let pad = CREATURE_SIZE * 0.6;
-                    c.wanderTargetX = p.random(pad, p.width  - pad) - c.originX;
-                    c.wanderTargetY = p.random(pad, p.height - pad) - c.originY;
-                    c.wanderChangeTimer = p.floor(p.random(30, 70));
-                }
-            }
-        } else {
-            c.wanderTargetX = 0;
-            c.wanderTargetY = 0;
-        }
-
-        c.wanderX = p.lerp(c.wanderX, c.wanderTargetX, 0.04);
-        c.wanderY = p.lerp(c.wanderY, c.wanderTargetY, 0.04);
-        c.x = c.originX + c.wanderX;
-        c.y = c.originY + c.wanderY;
+    function enterIdle() {
+        state = "idle";
+        stateTimer = 0;
+        targetTimer = p.int(p.random(120, 300));
     }
 
+    function enterWalking() {
+        state = "walking";
+        stateTimer = 0;
+        targetTimer = p.int(p.random(180, 360));
+        creature.targetX = p.random(150, p.width - 150);
+        creature.facing = creature.targetX > creature.x ? 1 : -1;
+    }
+
+    function enterPecking() {
+        state = "pecking";
+        stateTimer = 0;
+        peckPhase = 0;
+        pecksLeft = p.int(p.random(1, 2 + p.map(hunger, 0, 100, 0, 2)));
+    }
 
     // ============================================================
-    //  DRAWING
+    // DRAW LOOP
+    // ============================================================
+
+    p.draw = function () {
+        p.background(255);
+        hunger = p.min(100, hunger + 0.05);
+
+        if (!dragging && !draggingSeed) updateState();
+
+        drawCreature(creature);
+        drawSeed();
+        drawHungerMeter();
+    };
+chaosTime += 0.01; // LOWER = slower, calmer (try 0.005 if needed)
+
+    function updateState() {
+        stateTimer++;
+
+        if (state === "idle" && stateTimer > targetTimer) {
+            p.random() < p.map(hunger, 0, 100, 0.4, 0.75)
+                ? enterPecking()
+                : enterWalking();
+        }
+
+        if (state === "walking") {
+            creature.x += (creature.targetX - creature.x) * 0.03;
+            legPhase += 0.12;
+            if (stateTimer > targetTimer) enterIdle();
+        }
+
+        if (state === "pecking") {
+            peckPhase += 0.05;
+            if (peckPhase > p.PI) {
+                peckPhase = 0;
+                pecksLeft--;
+                if (pecksLeft <= 0) enterIdle();
+            }
+        }
+    }
+
+    // ============================================================
+    // CHAOTIC SHAPE HELPER
+    // ============================================================
+
+    function noisyEllipse(x, y, w, h, chaos) {
+        p.beginShape();
+        let detail = 14;
+        for (let i = 0; i < p.TWO_PI; i += p.TWO_PI / detail) {
+            let nx = x + p.cos(i) * (w / 2 + p.random(-chaos * 18, chaos * 18));
+            let ny = y + p.sin(i) * (h / 2 + p.random(-chaos * 18, chaos * 18));
+            p.vertex(nx, ny);
+        }
+        p.endShape(p.CLOSE);
+    }
+
+    // ============================================================
+    // DRAW CREATURE (NO BODY WOBBLE)
     // ============================================================
 
     function drawCreature(c) {
+let chaos = p.map(hunger, 45, 100, 0, 1);
+chaos = p.constrain(chaos, 0, 1);
+
+
+let jitterX = (p.noise(chaosTime, 0) - 0.5) * chaos * 12;
+let jitterY = (p.noise(0, chaosTime) - 0.5) * chaos * 12;
+
+        let colorJitter = chaos * 0;
+
         p.push();
-        p.translate(c.x, c.y);
-        p.translate(0, p.sin(c.bob) * 6);
+        p.translate(c.x + jitterX, c.y + jitterY);
+        p.scale(c.facing, 1);
 
-        let s = STATES[c.state];
-        let bScale = 1 + p.sin(c.breathe) * c.bounceAmt;
+        // ---------------- BODY ----------------
+        p.noStroke();
+        p.fill(
+            220 + p.random(-colorJitter, colorJitter),
+            170 + p.random(-colorJitter, colorJitter),
+            80 + p.random(-colorJitter, colorJitter)
+        );
+        noisyEllipse(0, 20, 220, 160, chaos);
 
-        if (s.shakeAmt > 0) {
-            p.translate(
-                p.random(-s.shakeAmt, s.shakeAmt),
-                p.random(-s.shakeAmt * 0.4, s.shakeAmt * 0.4)
-            );
+        p.fill(235, 195, 120);
+        noisyEllipse(-20, 30, 160, 120, chaos);
+
+        // ---------------- TAIL ----------------
+        p.fill(210, 160, 90);
+        noisyEllipse(-120, -10, 90, 80, chaos);
+        noisyEllipse(-110, -40, 70, 60, chaos);
+        noisyEllipse(-90, -60, 50, 40, chaos);
+
+        // ---------------- HEAD ----------------
+        let peckAmt = state === "pecking"
+            ? p.constrain(p.sin(peckPhase), 0, 1)
+            : 0;
+
+        p.push();
+        p.translate(95 + peckAmt * 16, -40);
+        p.rotate(p.radians(peckAmt * (18 + chaos * 30)));
+        p.translate(0, peckAmt * (24 + chaos * 20));
+
+        p.fill(220, 170, 80);
+        noisyEllipse(0, 0, 80, 70, chaos);
+
+        p.fill(200, 40, 40);
+        p.triangle(0, -25, -15, -45, 15, -45);
+
+        p.fill(245, 200, 60);
+        p.triangle(35, 0, 70, 8, 35, 15);
+
+        p.fill(0);
+        p.ellipse(5, -5, 6, 6);
+
+        p.pop();
+
+        // ---------------- LEGS ----------------
+        p.stroke(200, 170, 60);
+        p.strokeWeight(6);
+
+        let swing = state === "walking"
+            ? p.sin(legPhase) * (0.4 + chaos)
+            : p.sin(p.frameCount * 0.3) * chaos * 0.3;
+
+        p.push();
+        p.translate(-45, 90);
+        p.rotate(swing);
+        p.line(0, 0, 0, 42);
+        p.pop();
+
+        p.push();
+        p.translate(30, 90);
+        p.rotate(-swing);
+        p.line(0, 0, 0, 42);
+        p.pop();
+
+        // ---------------- GLITCH LINES ----------------
+        if (chaos > 0.5) {
+            p.stroke(0, 40);
+            for (let i = 0; i < chaos * 10; i++) {
+                p.line(
+                    p.random(-140, 140),
+                    p.random(-80, 120),
+                    p.random(-140, 140),
+                    p.random(-80, 120)
+                );
+            }
         }
 
-        p.scale(bScale);
-        drawBody(c);
-        drawEyes(c);
-        drawFace(c);
         p.pop();
     }
-function drawFace(c) {
 
-    // Convert need (0–100) into happiness (happy → sad)
-    let happiness = p.map(c.need, 0, 100, 1, -1);
-    happiness = p.constrain(happiness, -1, 1);
+    // ============================================================
+    // SEED + UI
+    // ============================================================
 
-    // Mouth positioning
-    let mouthY     = CREATURE_SIZE * 0.18;
-    let mouthWidth = CREATURE_SIZE * 0.30;
-    let mouthCurve = CREATURE_SIZE * 0.18 * happiness;
-
-    // Extra smile when excited
-    if (c.state === 'excited') {
-        mouthCurve *= 1.6;
-    }
-
-    // Draw mouth
-    p.noFill();
-    p.stroke(20, c.bodyAlpha);
-    p.strokeWeight(4);
-    p.strokeCap(p.ROUND);
-
-    p.beginShape();
-    p.vertex(-mouthWidth / 2, mouthY);
-    p.quadraticVertex(0, mouthY + mouthCurve, mouthWidth / 2, mouthY);
-    p.endShape();
-
-    p.noStroke();
-}
-``
-
-    // ── EDIT THIS — redesign the creature's body ──────────────
-
-    function drawBody(c) {
+    function drawSeed() {
+        p.push();
+        p.translate(seed.x, seed.y);
+        p.rotate(-0.4);
         p.noStroke();
-        p.fill(...bodyColour, c.bodyAlpha);
-        p.ellipse(0, 0, CREATURE_SIZE, CREATURE_SIZE);
+        p.fill(40, 30, 20);
+        p.ellipse(0, 0, 22, 30);
+        p.pop();
     }
 
+    function drawHungerMeter() {
+        p.fill(0);
+        p.text("HUNGER", 20, 30);
+        p.noFill();
+        p.rect(20, 40, 120, 10);
+        p.fill(200, 80, 80);
+        p.rect(20, 40, p.map(hunger, 0, 100, 0, 120), 10);
+    }
 
-    // ── EDIT THIS — or remove the call from drawCreature() ────
+    // ============================================================
+    // INTERACTION
+    // ============================================================
 
-    function drawEyes(c) {
-        let eyeSize    = CREATURE_SIZE * 0.55;
-        let eyeSpacing = CREATURE_SIZE * 0.16;
-        let eyeY       = -CREATURE_SIZE * 0.16;
-
-        let pupilSize = c.state === 'excited' ? eyeSize * 0.38 : eyeSize * 0.30;
-
-        let angle     = p.atan2(p.mouseY - c.y, p.mouseX - c.x);
-        let mouseDist = p.dist(p.mouseX, p.mouseY, c.x, c.y);
-        let move      = p.min(eyeSize * 0.18, mouseDist * 0.012);
-        let px2       = p.cos(angle) * move;
-        let py2       = p.sin(angle) * move;
-
-        for (let side of [-1, 1]) {
-            let ex = eyeSpacing * side;
-            let ey = eyeY;
-            p.noStroke();
-            p.fill(255);
-            p.ellipse(ex, ey, eyeSize * 0.5, eyeSize * 0.5);
-            p.ellipse(ex * 2, ey * 2, eyeSize * 0.5, eyeSize * 0.5);
-            p.ellipse(ex * 2, ey / 8, eyeSize * 0.5, eyeSize * 0.5);
-            p.fill(20);
-            p.ellipse(ex + px2, ey + py2, pupilSize, pupilSize);
-            p.ellipse(ex * 2 + px2, ey * 2 + py2, pupilSize, pupilSize);
-            p.ellipse(ex * 2 + px2, ey / 8 + py2, pupilSize, pupilSize);
-            
+    p.mousePressed = function () {
+        if (p.dist(p.mouseX, p.mouseY, seed.x, seed.y) < 25) {
+            draggingSeed = true;
+            return;
         }
-        p.noStroke();
-    }
 
-
-    // ============================================================
-    //  INPUT: MOUSE CLICK
-    // ============================================================
-
-    function onCanvasClick() {
-        if (!micActive) startMic();
-        let d = p.dist(p.mouseX, p.mouseY, creature.x, creature.y);
-        if (d < CREATURE_SIZE / 2) {
-            creature.need = p.max(0, creature.need - CLICK_FEED);
+        if (p.dist(p.mouseX, p.mouseY, creature.x, creature.y) < PICK_RADIUS) {
+            dragging = true;
+            dragOffsetX = creature.x - p.mouseX;
+            dragOffsetY = creature.y - p.mouseY;
         }
-    }
-
-
-    // ============================================================
-    //  INPUT: MICROPHONE
-    // ============================================================
-
-    async function startMic() {
-        try {
-            let stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-            let ctx    = new (window.AudioContext || window.webkitAudioContext)();
-            let source = ctx.createMediaStreamSource(stream);
-            micAnalyser = ctx.createAnalyser();
-            micAnalyser.fftSize = 256;
-            source.connect(micAnalyser);
-            micData   = new Uint8Array(micAnalyser.frequencyBinCount);
-            micActive = true;
-        } catch(e) {
-            console.log('Mic unavailable:', e);
-        }
-    }
-
-    function getMicLevel() {
-        if (!micAnalyser) return 0;
-        micAnalyser.getByteFrequencyData(micData);
-        let sum = 0;
-        for (let i = 0; i < micData.length; i++) sum += micData[i];
-        return sum / (micData.length * 255);
-    }
-
-    function updateMic(c) {
-        if (!micActive) return;
-        c.micLevel = getMicLevel();
-        if (c.micLevel > MIC_THRESHOLD) c.exciteTimer = EXCITED_FRAMES;
-    }
-
-
-
-    // ============================================================
-    //  PERSISTENCE
-    // ============================================================
-
-    function saveState(c) {
-        try {
-            localStorage.setItem('creature_v2', JSON.stringify({
-                need: c.need, lastVisit: Date.now(), totalVisits: c.totalVisits,
-            }));
-        } catch(e) {}
-    }
-
-    function loadState(c) {
-        try {
-            let raw = localStorage.getItem('creature_v2');
-            if (!raw) { c.totalVisits = 1; return; }
-            let data = JSON.parse(raw);
-            c.need        = data.need || 50;
-            c.lastVisit   = data.lastVisit;
-            c.totalVisits = (data.totalVisits || 0) + 1;
-            if (c.lastVisit) {
-                let hours = Math.min((Date.now() - c.lastVisit) / 3600000, AFK_MAX_HOURS);
-                c.need = Math.min(c.need + hours * AFK_PER_HOUR, 100);
-            }
-        } catch(e) {
-            c.totalVisits = 1;
-        }
-    }
-
-
-    // ============================================================
-    //  SIDEBAR SYNC  —  updates the live state panel each frame
-    // ============================================================
-
-    function updateSidebar(c) {
-        ui.hour.textContent    = c.hour % 12 || 12;
-        ui.period.textContent  = c.hour < 12 ? 'am' : 'pm';
-        ui.state.textContent   = c.state;
-        ui.desc.textContent    = STATE_DESCRIPTIONS[c.state] || '';
-        ui.needVal.textContent = Math.floor(c.need);
-        ui.visits.textContent  = c.totalVisits;
-        ui.excited.textContent = c.exciteTimer > 0 ? 'yes!' : 'no';
-        ui.watched.textContent = c.isWatched ? 'on' : 'away';
-        ui.mic.textContent     = micActive ? c.micLevel.toFixed(2) : '—';
-
-        ui.needBar.style.width = c.need + '%';
-        ui.needBar.style.backgroundColor =
-            c.need < 30 ? '#788c5d' :
-            c.need < 70 ? '#c9973a' : '#c0522a';
-    }
-
-
-    // ============================================================
-    //  WINDOW RESIZE
-    // ============================================================
-
-    p.windowResized = function() {
-        let sz = canvasSize();
-        p.resizeCanvas(sz.w, sz.h);
-        creature.originX = p.width / 2;
-        creature.originY = p.height / 2;
     };
 
+    p.mouseDragged = function () {
+        if (draggingSeed) {
+            seed.x = p.mouseX;
+            seed.y = p.mouseY;
+        }
 
-    // ============================================================
-    //  SIDEBAR CONTROLS  —  exposed to button onclick handlers
-    // ============================================================
+        if (dragging) {
+            creature.x = p.mouseX + dragOffsetX;
+            creature.y = p.mouseY + dragOffsetY;
+        }
+    };
 
-    window._resetNeed = () => { if (creature) creature.need = 0; };
-    window._maxNeed   = () => { if (creature) creature.need = 100; };
-    window._setDecay  = v => { DECAY_RATE = v; };
-    window._setFeed   = v => { CLICK_FEED = v; };
+    p.mouseReleased = function () {
+        if (draggingSeed && p.dist(seed.x, seed.y, creature.x, creature.y) < 120) {
+            hunger = p.max(0, hunger - 25);
+            resetSeed();
+        }
+
+        draggingSeed = false;
+        dragging = false;
+        enterIdle();
+    };
+
+    p.windowResized = function () {
+        p.resizeCanvas(p.windowWidth - 40, p.windowHeight - 40);
+        resetSeed();
+    };
 
 }, document.body);
