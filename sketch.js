@@ -42,7 +42,7 @@ new p5(function (p) {
 
     p.setup = function () {
         let cnv = p.createCanvas(p.windowWidth - 40, p.windowHeight - 40);
-        cnv.parent('canvas-container');
+        cnv.parent("canvas-container");
 
         creature = createCreature(p.width / 2, p.height / 2);
         resetSeed();
@@ -71,7 +71,9 @@ new p5(function (p) {
         state = "pecking";
         stateTimer = 0;
         peckPhase = 0;
-        pecksLeft = p.int(p.random(1, 2 + p.map(hunger, 0, 100, 0, 2)));
+        pecksLeft = p.int(
+            p.random(1, 2 + p.map(hunger, 0, 100, 0, 2))
+        );
     }
 
     // ============================================================
@@ -80,6 +82,8 @@ new p5(function (p) {
 
     p.draw = function () {
         p.background(255);
+
+        chaosTime += 0.01;
         hunger = p.min(100, hunger + 0.05);
 
         if (!dragging && !draggingSeed) updateState();
@@ -88,7 +92,6 @@ new p5(function (p) {
         drawSeed();
         drawHungerMeter();
     };
-chaosTime += 0.01; // LOWER = slower, calmer (try 0.005 if needed)
 
     function updateState() {
         stateTimer++;
@@ -116,7 +119,7 @@ chaosTime += 0.01; // LOWER = slower, calmer (try 0.005 if needed)
     }
 
     // ============================================================
-    // CHAOTIC SHAPE HELPER
+    // CHAOTIC SHAPE (ORIGINAL LOOK)
     // ============================================================
 
     function noisyEllipse(x, y, w, h, chaos) {
@@ -130,43 +133,45 @@ chaosTime += 0.01; // LOWER = slower, calmer (try 0.005 if needed)
         p.endShape(p.CLOSE);
     }
 
+    function chaosEllipse(x, y, w, h, chaos) {
+        if (chaos === 0) {
+            p.ellipse(x, y, w, h);
+        } else {
+            noisyEllipse(x, y, w, h, chaos);
+        }
+    }
+
     // ============================================================
-    // DRAW CREATURE (NO BODY WOBBLE)
+    // DRAW CREATURE
     // ============================================================
 
     function drawCreature(c) {
-let chaos = p.map(hunger, 45, 100, 0, 1);
-chaos = p.constrain(chaos, 0, 1);
 
+        let chaos = p.map(hunger, 45, 100, 0, 1);
+        chaos = p.constrain(chaos, 0, 1);
 
-let jitterX = (p.noise(chaosTime, 0) - 0.5) * chaos * 12;
-let jitterY = (p.noise(0, chaosTime) - 0.5) * chaos * 12;
-
-        let colorJitter = chaos * 0;
+        let jitterX = (p.noise(chaosTime, 0) - 0.5) * chaos * 12;
+        let jitterY = (p.noise(0, chaosTime) - 0.5) * chaos * 12;
 
         p.push();
         p.translate(c.x + jitterX, c.y + jitterY);
         p.scale(c.facing, 1);
 
-        // ---------------- BODY ----------------
+        // BODY
         p.noStroke();
-        p.fill(
-            220 + p.random(-colorJitter, colorJitter),
-            170 + p.random(-colorJitter, colorJitter),
-            80 + p.random(-colorJitter, colorJitter)
-        );
-        noisyEllipse(0, 20, 220, 160, chaos);
+        p.fill(220, 170, 80);
+        chaosEllipse(0, 20, 220, 160, chaos);
 
         p.fill(235, 195, 120);
-        noisyEllipse(-20, 30, 160, 120, chaos);
+        chaosEllipse(-20, 30, 160, 120, chaos);
 
-        // ---------------- TAIL ----------------
+        // TAIL
         p.fill(210, 160, 90);
-        noisyEllipse(-120, -10, 90, 80, chaos);
-        noisyEllipse(-110, -40, 70, 60, chaos);
-        noisyEllipse(-90, -60, 50, 40, chaos);
+        chaosEllipse(-120, -10, 90, 80, chaos);
+        chaosEllipse(-110, -40, 70, 60, chaos);
+        chaosEllipse(-90, -60, 50, 40, chaos);
 
-        // ---------------- HEAD ----------------
+        // HEAD
         let peckAmt = state === "pecking"
             ? p.constrain(p.sin(peckPhase), 0, 1)
             : 0;
@@ -177,7 +182,7 @@ let jitterY = (p.noise(0, chaosTime) - 0.5) * chaos * 12;
         p.translate(0, peckAmt * (24 + chaos * 20));
 
         p.fill(220, 170, 80);
-        noisyEllipse(0, 0, 80, 70, chaos);
+        chaosEllipse(0, 0, 80, 70, chaos);
 
         p.fill(200, 40, 40);
         p.triangle(0, -25, -15, -45, 15, -45);
@@ -187,30 +192,41 @@ let jitterY = (p.noise(0, chaosTime) - 0.5) * chaos * 12;
 
         p.fill(0);
         p.ellipse(5, -5, 6, 6);
-
         p.pop();
 
-        // ---------------- LEGS ----------------
+        // ========================================================
+        // SIMPLE BIRD LEGS (WALKING SAFE)
+        // ========================================================
+
         p.stroke(200, 170, 60);
-        p.strokeWeight(6);
+        p.strokeWeight(4);
 
-        let swing = state === "walking"
-            ? p.sin(legPhase) * (0.4 + chaos)
-            : p.sin(p.frameCount * 0.3) * chaos * 0.3;
+        let swing = state === "walking" ? p.sin(legPhase) * 0.5 : 0;
+        let legJitter = chaos * 2;
 
+        // LEFT LEG
         p.push();
-        p.translate(-45, 90);
+        p.translate(-20 + p.random(-legJitter, legJitter), 80);
         p.rotate(swing);
-        p.line(0, 0, 0, 42);
+
+        p.line(0, 0, 0, 32);
+        p.line(0, 32, -8, 38);
+        p.line(0, 32, 8, 38);
+        p.line(0, 32, 0, 42);
         p.pop();
 
+        // RIGHT LEG
         p.push();
-        p.translate(30, 90);
+        p.translate(15 + p.random(-legJitter, legJitter), 80);
         p.rotate(-swing);
-        p.line(0, 0, 0, 42);
+
+        p.line(0, 0, 0, 32);
+        p.line(0, 32, -8, 38);
+        p.line(0, 32, 8, 38);
+        p.line(0, 32, 0, 42);
         p.pop();
 
-        // ---------------- GLITCH LINES ----------------
+        // GLITCH LINES
         if (chaos > 0.5) {
             p.stroke(0, 40);
             for (let i = 0; i < chaos * 10; i++) {
