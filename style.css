@@ -3,52 +3,49 @@
    MDDN242 Project 2
    ============================================================ */
 
-
-
 :root {
-    --dark:       #141413;
-    --azure:      azure;
-    --steel-blue:   lightsteelblue;
-    --powder-blue: powderblue;
-    --orange:     darkorange;
-    --blue:       #6a9bcc;
-    --green:      #788c5d;
+  --dark:         #141413;
+  --azure:        azure;
+  --steel-blue:   lightsteelblue;
+  --powder-blue:  powderblue;
+  --orange:       darkorange;
+  --blue:         #6a9bcc;
+  --green:        #788c5d;
 }
-
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-    font-family: 'Poppins', sans-serif;
-    background: linear-gradient(135deg, var(--azure) 0%, #f5f3ee 100%);
-    min-height: 100vh;
-    color: var(--dark);
+  font-family: 'Poppins', sans-serif;
+  background: linear-gradient(135deg, var(--azure) 0%, #f5f3ee 100%);
+  min-height: 100vh;
+  color: var(--dark);
 }
 
 /* ── Layout ── */
 
 .container {
-    display: flex;
-    height: 100vh;
-    overflow: hidden;
-    padding: 20px;
-    gap: 20px;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  padding: 20px;
+  gap: 20px;
 }
 
 .canvas-area {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
 }
 
 #canvas-container {
-    border-radius: 10px;
-    overflow: hidden;
-    box-shadow: 0 20px 50px rgba(20, 20, 19, 0.12);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 20px 50px rgba(20, 20, 19, 0.12);
 }
 
 #canvas-container canvas {
-    display: block;
+  display: block;
 }

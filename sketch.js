@@ -1,4 +1,3 @@
-
 (function () {
   const box = document.createElement("pre");
   box.id = "debug-overlay";
@@ -40,12 +39,11 @@ new p5(function (p) {
   // ----------------------------
   // CONFIG
   // ----------------------------
-  // Lower Hutt / Wellington region approx coords
   const NZ_LAT = -41.21;
   const NZ_LON = 174.90;
   const WEATHER_REFRESH_MS = 10 * 60 * 1000;
 
-  const STORAGE_KEY = "mddn242_familiar_state_v8";
+  const STORAGE_KEY = "mddn242_familiar_state_v10_roots_corruptChicken";
 
   const GROUND_H = 60;
   const PICK_RADIUS = 140;
@@ -53,6 +51,34 @@ new p5(function (p) {
   const HUNGER_PER_SEC = 1.2;
   const DRAG_HUNGER_PER_SEC = 2.6;
   const FEED_AMOUNT = 25;
+
+  // ---- 100% HUNGER OVERLOAD (build clutter over 30s, then explode) ----
+  const OVERLOAD_SECONDS = 30;
+  const RESPAWN_SECONDS = 10;
+  const CLUTTER_CAP = 1600;
+
+  // ---- WORLD CORRUPTION (grid) ----
+  // corruption is 0..1 stored as bytes 0..255
+  const CORR_CELL = 22;
+  const CORR_START_HUNGER = 55;
+  const CORR_FULL_HUNGER = 100;
+  const CORR_EMIT_PER_SEC = 120;
+  const CORR_SPREAD = 0.24;
+  const CORR_DECAY_PER_SEC = 8;
+  const CORR_PURIFY_PER_SEC = 18;
+  const CORR_PURIFY_RADIUS = 160;
+  const CORR_DRAW_ALPHA = 165;
+
+  // ---- ROOT VEINS (branching growth) ----
+  const ROOT_MAX_TIPS = 160;
+  const ROOT_MAX_POINTS = 9000;
+  const ROOT_STEP_MIN = 2.0;
+  const ROOT_STEP_MAX = 6.0;
+  const ROOT_BRANCH_CHANCE = 0.020;   // per tip per second at full hunger
+  const ROOT_FADE_PER_SEC = 0.65;
+  const ROOT_SPAWN_RATE = 1.6;        // tips/sec at full hunger from chicken
+  const ROOT_INFECT_SPAWN = 0.8;      // extra spawn from infected ground
+  const CORR_DRAW_GRID = false;       // keep stains OFF, roots ON
 
   // ----------------------------
   // STATE
@@ -86,6 +112,29 @@ new p5(function (p) {
   let rain = [];
   let lightning = 0;
 
+  // ---- Overload / Respawn ----
+  let overloadTimer = 0;
+  let overloadLevel = 0;
+
+  let respawning = false;
+  let respawnT = 0;
+
+  // click-to-move
+  let clickMoveActive = false;
+
+  // clutter bits
+  let clutterBits = [];
+
+  // ---- corruption field ----
+  let corrW = 0, corrH = 0;
+  let corr = null;       // Uint8Array
+  let corrNext = null;   // Uint8Array
+
+  // ---- root veins ----
+  let rootTips = [];
+  let rootPointCount = 0;
+  let rootSpawnAcc = 0;
+
   // NZ time
   let nz = {
     minutes: 720,
@@ -107,10 +156,470 @@ new p5(function (p) {
   };
 
   // ----------------------------
-  // BASIC HELPERS
+  // HELPERS
   // ----------------------------
   function groundY() { return p.height - GROUND_H; }
-  function createCreature(x, y) { return { x, y, targetX: x, facing: 1 }; }
+
+  function createCreature(x, y) {
+    return { x, y, targetX: x, targetY: y, facing: 1 };
+  }
+
+  function setClickTarget(mx, my) {
+    creature.targetX = p.constrain(mx, 150, p.width - 150);
+    creature.targetY = p.constrain(my, 80, groundY() - 40);
+    creature.facing = creature.targetX > creature.x ? 1 : -1;
+
+    clickMoveActive = true;
+    state = "walking";
+    stateTimer = 0;
+    targetTimer = 999999;
+  }
+
+  // ----------------------------
+  // WORLD CORRUPTION (grid)
+  // ----------------------------
+  function corrIndex(ix, iy) { return ix + iy * corrW; }
+
+  function initCorruption() {
+    corrW = Math.max(1, Math.ceil(p.width / CORR_CELL));
+    corrH = Math.max(1, Math.ceil(groundY() / CORR_CELL));
+    corr = new Uint8Array(corrW * corrH);
+    corrNext = new Uint8Array(corrW * corrH);
+  }
+
+  function sampleCorr01(x, y) {
+    if (!corr) return 0;
+    const ix = p.constrain(Math.floor(x / CORR_CELL), 0, corrW - 1);
+    const iy = p.constrain(Math.floor(y / CORR_CELL), 0, corrH - 1);
+    return corr[corrIndex(ix, iy)] / 255;
+  }
+
+  function addCorrBlob(x, y, radius, amountBytes) {
+    if (!corr) return;
+
+    const cx = Math.floor(x / CORR_CELL);
+    const cy = Math.floor(y / CORR_CELL);
+    const r = Math.ceil(radius / CORR_CELL);
+
+    for (let oy = -r; oy <= r; oy++) {
+      const iy = cy + oy;
+      if (iy < 0 || iy >= corrH) continue;
+
+      for (let ox = -r; ox <= r; ox++) {
+        const ix = cx + ox;
+        if (ix < 0 || ix >= corrW) continue;
+
+        const dx = ox * CORR_CELL;
+        const dy = oy * CORR_CELL;
+        const d = Math.sqrt(dx * dx + dy * dy);
+
+        if (d <= radius) {
+          const t = 1 - (d / radius);
+          const boost = amountBytes * (t * t);
+          const idx = corrIndex(ix, iy);
+          const v = corr[idx] + boost;
+          corr[idx] = v > 255 ? 255 : v;
+        }
+      }
+    }
+  }
+
+  function purifyCorr(x, y, radius, amountBytes) {
+    if (!corr) return;
+
+    const cx = Math.floor(x / CORR_CELL);
+    const cy = Math.floor(y / CORR_CELL);
+    const r = Math.ceil(radius / CORR_CELL);
+
+    for (let oy = -r; oy <= r; oy++) {
+      const iy = cy + oy;
+      if (iy < 0 || iy >= corrH) continue;
+
+      for (let ox = -r; ox <= r; ox++) {
+        const ix = cx + ox;
+        if (ix < 0 || ix >= corrW) continue;
+
+        const dx = ox * CORR_CELL;
+        const dy = oy * CORR_CELL;
+        const d = Math.sqrt(dx * dx + dy * dy);
+
+        if (d <= radius) {
+          const t = 1 - (d / radius);
+          const cut = amountBytes * (t * t);
+          const idx = corrIndex(ix, iy);
+          const v = corr[idx] - cut;
+          corr[idx] = v < 0 ? 0 : v;
+        }
+      }
+    }
+  }
+
+  function updateCorruption(dt) {
+    if (!corr) return;
+
+    let a = p.map(hunger, CORR_START_HUNGER, CORR_FULL_HUNGER, 0, 1);
+    a = p.constrain(a, 0, 1);
+
+    // emit around chicken
+    if (!respawning && a > 0.001) {
+      const emit = CORR_EMIT_PER_SEC * a * dt;
+
+      const blobs = 2 + Math.floor(a * 4);
+      for (let i = 0; i < blobs; i++) {
+        const ang = p.noise(chaosTime * 0.6, i * 10.3) * p.TWO_PI * 2;
+        const rad = p.lerp(20, 95, p.noise(i * 4.1, chaosTime * 0.9));
+        const bx = creature.x + Math.cos(ang) * rad;
+        const by = creature.y + Math.sin(ang) * rad * 0.7;
+        addCorrBlob(bx, by, p.lerp(70, 130, a), emit * 255);
+      }
+    }
+
+    // plants purify
+    for (const f of flowers) {
+      purifyCorr(f.x, f.y - 15, 90, 16 * dt * 255);
+    }
+
+    // global purify when hunger is low
+    const calm = 1 - p.constrain(hunger / CORR_START_HUNGER, 0, 1);
+    const globalPurify = CORR_PURIFY_PER_SEC * calm * dt;
+
+    const spread = CORR_SPREAD;
+    const decay = CORR_DECAY_PER_SEC * dt;
+    const gpur = globalPurify;
+
+    for (let y = 0; y < corrH; y++) {
+      for (let x = 0; x < corrW; x++) {
+        const idx = corrIndex(x, y);
+        const v = corr[idx];
+
+        let sum = v;
+        let count = 1;
+
+        if (x > 0) { sum += corr[idx - 1]; count++; }
+        if (x < corrW - 1) { sum += corr[idx + 1]; count++; }
+        if (y > 0) { sum += corr[idx - corrW]; count++; }
+        if (y < corrH - 1) { sum += corr[idx + corrW]; count++; }
+
+        if (x > 0 && y > 0) { sum += corr[idx - corrW - 1]; count++; }
+        if (x < corrW - 1 && y > 0) { sum += corr[idx - corrW + 1]; count++; }
+        if (x > 0 && y < corrH - 1) { sum += corr[idx + corrW - 1]; count++; }
+        if (x < corrW - 1 && y < corrH - 1) { sum += corr[idx + corrW + 1]; count++; }
+
+        const avg = sum / count;
+
+        let nv = v + (avg - v) * spread;
+
+        let a2 = p.map(hunger, CORR_START_HUNGER, CORR_FULL_HUNGER, 0, 1);
+        a2 = p.constrain(a2, 0, 1);
+        if (a2 > 0.001 && avg > 70) {
+          nv += (avg - 70) * 0.06 * a2;
+        }
+
+        nv -= decay;
+        nv -= gpur;
+
+        if (nv < 0) nv = 0;
+        if (nv > 255) nv = 255;
+
+        corrNext[idx] = nv | 0;
+      }
+    }
+
+    const tmp = corr;
+    corr = corrNext;
+    corrNext = tmp;
+  }
+
+  function maxCorrByte() {
+    if (!corr) return 0;
+    let m = 0;
+    const step = 5;
+    for (let i = 0; i < corr.length; i += step) {
+      if (corr[i] > m) m = corr[i];
+    }
+    return m;
+  }
+
+  function drawCorruptionOverlay() {
+    if (!corr) return;
+
+    const maxV = maxCorrByte();
+    const worldAmt = p.constrain(maxV / 255, 0, 1);
+
+    let a = p.map(hunger, CORR_START_HUNGER, CORR_FULL_HUNGER, 0, 1);
+    a = p.constrain(a, 0, 1);
+
+    const vis = p.constrain(0.25 * worldAmt + 0.85 * a, 0, 1);
+    if (vis < 0.02) return;
+
+    // optional subtle haze (kept very light so it doesn't “change your style” too much)
+    p.push();
+    p.noStroke();
+    p.fill(25, 25, 40, 22 * vis);
+    p.rect(0, 0, p.width, groundY());
+    p.pop();
+
+    // keep grid stains OFF unless you toggle CORR_DRAW_GRID = true
+    if (CORR_DRAW_GRID) {
+      p.push();
+      p.noStroke();
+      const alphaCap = CORR_DRAW_ALPHA * vis;
+
+      for (let y = 0; y < corrH; y++) {
+        for (let x = 0; x < corrW; x++) {
+          const idx = corrIndex(x, y);
+          const v = corr[idx];
+          if (v < 6) continue;
+
+          const t = v / 255;
+          const r = p.lerp(45, 30, t);
+          const g = p.lerp(65, 120, t * 0.6);
+          const b = p.lerp(80, 140, t);
+          const ax = (t * alphaCap);
+
+          p.fill(r, g, b, ax);
+          p.rect(x * CORR_CELL, y * CORR_CELL, CORR_CELL + 1, CORR_CELL + 1, 5);
+        }
+      }
+      p.pop();
+    }
+  }
+
+  // --- compression for localStorage ---
+  function packCorr() {
+    try {
+      if (!corr) return "";
+      let bin = "";
+      for (let i = 0; i < corr.length; i++) bin += String.fromCharCode(corr[i]);
+      return btoa(bin);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function unpackCorr(b64, w, h) {
+    try {
+      if (!b64) return false;
+      const bin = atob(b64);
+      if (bin.length !== w * h) return false;
+      corrW = w;
+      corrH = h;
+      corr = new Uint8Array(w * h);
+      corrNext = new Uint8Array(w * h);
+      for (let i = 0; i < bin.length; i++) corr[i] = bin.charCodeAt(i) & 255;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function resampleCorr(oldArr, oldW, oldH, newW, newH) {
+    const out = new Uint8Array(newW * newH);
+    for (let y = 0; y < newH; y++) {
+      const sy = Math.floor((y / newH) * oldH);
+      for (let x = 0; x < newW; x++) {
+        const sx = Math.floor((x / newW) * oldW);
+        out[x + y * newW] = oldArr[sx + sy * oldW];
+      }
+    }
+    return out;
+  }
+
+  // ----------------------------
+  // ROOT VEINS (branching growth)
+  // ----------------------------
+  function lerpAngle(a, b, t) {
+    let d = (b - a + Math.PI * 3) % (Math.PI * 2) - Math.PI;
+    return a + d * t;
+  }
+
+  function spawnRootTip(x, y, baseDir, thick, seed) {
+    if (rootTips.length >= ROOT_MAX_TIPS) return;
+    if (rootPointCount >= ROOT_MAX_POINTS) return;
+
+    const tip = {
+      pts: [{ x, y }],
+      dir: baseDir,
+      thick,
+      seed,
+      alive: true,
+      fade: 1
+    };
+    rootTips.push(tip);
+    rootPointCount += 1;
+  }
+
+  function spawnRootsFromChicken(a, dt) {
+    if (a <= 0.001) return;
+
+    rootSpawnAcc += ROOT_SPAWN_RATE * a * dt;
+    while (rootSpawnAcc >= 1) {
+      rootSpawnAcc -= 1;
+
+      const ang = p.random(p.TWO_PI);
+      const r = p.random(12, 55);
+      const x = creature.x + Math.cos(ang) * r;
+      const y = creature.y + Math.sin(ang) * r * 0.7;
+
+      const baseDir = Math.atan2(y - creature.y, x - creature.x);
+
+      spawnRootTip(
+        p.constrain(x, 10, p.width - 10),
+        p.constrain(y, 10, groundY() - 20),
+        baseDir + p.random(-0.35, 0.35),
+        p.random(2.2, 3.4) * (0.65 + 0.55 * a),
+        p.random(9999)
+      );
+    }
+  }
+
+  function spawnRootsFromInfection(dt) {
+    if (!corr || rootTips.length >= ROOT_MAX_TIPS) return;
+
+    const m = maxCorrByte();
+    if (m < 140) return;
+
+    const chance = ROOT_INFECT_SPAWN * (m / 255) * dt;
+    if (p.random() > chance) return;
+
+    for (let tries = 0; tries < 10; tries++) {
+      const ix = p.int(p.random(corrW));
+      const iy = p.int(p.random(corrH));
+      const v = corr[corrIndex(ix, iy)];
+      if (v < 160) continue;
+
+      const x = ix * CORR_CELL + CORR_CELL * 0.5;
+      const y = iy * CORR_CELL + CORR_CELL * 0.5;
+
+      const ang = p.noise(ix * 0.11, iy * 0.11, chaosTime * 0.2) * p.TWO_PI * 2;
+      spawnRootTip(x, y, ang, p.random(1.6, 2.6), p.random(9999));
+      break;
+    }
+  }
+
+  function purgeRoots(x, y, radius) {
+    const r2 = radius * radius;
+    for (const tip of rootTips) {
+      if (!tip.pts.length) continue;
+      const pLast = tip.pts[tip.pts.length - 1];
+      const dx = pLast.x - x;
+      const dy = pLast.y - y;
+      if (dx * dx + dy * dy < r2) {
+        tip.alive = false;
+      }
+    }
+  }
+
+  function updateRoots(dt) {
+    let a = p.map(hunger, CORR_START_HUNGER, CORR_FULL_HUNGER, 0, 1);
+    a = p.constrain(a, 0, 1);
+
+    if (!respawning) {
+      spawnRootsFromChicken(a, dt);
+      spawnRootsFromInfection(dt);
+    }
+
+    for (let i = rootTips.length - 1; i >= 0; i--) {
+      const tip = rootTips[i];
+
+      if (!tip.alive) {
+        tip.fade -= ROOT_FADE_PER_SEC * dt;
+        if (tip.fade <= 0) {
+          rootPointCount -= tip.pts.length;
+          rootTips.splice(i, 1);
+        }
+        continue;
+      }
+
+      const last = tip.pts[tip.pts.length - 1];
+
+      if (last.x < -20 || last.x > p.width + 20 || last.y < -20 || last.y > groundY() - 10) {
+        tip.alive = false;
+        continue;
+      }
+
+      const localC = sampleCorr01(last.x, last.y);
+
+      const nAng = p.noise(last.x * 0.006, last.y * 0.006, chaosTime * 0.35 + tip.seed) * p.TWO_PI * 2;
+      const outAng = Math.atan2(last.y - creature.y, last.x - creature.x);
+
+      const noisyMix = p.lerp(0.45, 0.85, a);
+      const targetAng = lerpAngle(outAng, nAng, noisyMix);
+
+      tip.dir = lerpAngle(tip.dir, targetAng, 0.16);
+
+      const step = p.lerp(ROOT_STEP_MIN, ROOT_STEP_MAX, a) * (0.75 + 0.55 * p.noise(tip.seed, chaosTime));
+
+      const nx = last.x + Math.cos(tip.dir) * step;
+      const ny = last.y + Math.sin(tip.dir) * step * 0.75;
+
+      if (rootPointCount < ROOT_MAX_POINTS) {
+        tip.pts.push({
+          x: p.constrain(nx, -30, p.width + 30),
+          y: p.constrain(ny, -30, groundY() - 10)
+        });
+        rootPointCount++;
+      } else {
+        tip.alive = false;
+        continue;
+      }
+
+      if (!respawning && a > 0.05) {
+        const deposit = (30 + 140 * a) * dt * 255;
+        addCorrBlob(nx, ny, p.lerp(18, 40, a), deposit);
+      }
+
+      const branchChance = ROOT_BRANCH_CHANCE * (0.4 + 0.9 * a + 0.6 * localC);
+      if (rootTips.length < ROOT_MAX_TIPS && p.random() < branchChance * dt) {
+        const bend = p.random() < 0.5 ? -1 : 1;
+        const newDir = tip.dir + bend * p.random(0.45, 1.0);
+        const newThick = tip.thick * p.random(0.55, 0.78);
+        spawnRootTip(nx, ny, newDir, newThick, tip.seed + p.random(200, 900));
+      }
+
+      tip.thick *= (1 - 0.015 * dt);
+      if (tip.thick < 0.7) tip.alive = false;
+    }
+  }
+
+  function drawRoots() {
+    if (!rootTips.length) return;
+
+    let a = p.map(hunger, CORR_START_HUNGER, CORR_FULL_HUNGER, 0, 1);
+    a = p.constrain(a, 0, 1);
+
+    const m = maxCorrByte();
+    const worldAmt = p.constrain(m / 255, 0, 1);
+    const vis = p.constrain(0.25 * worldAmt + 0.85 * a, 0, 1);
+    if (vis < 0.02) return;
+
+    p.push();
+    p.noFill();
+
+    for (const tip of rootTips) {
+      if (tip.pts.length < 2) continue;
+
+      const last = tip.pts[tip.pts.length - 1];
+      const localC = sampleCorr01(last.x, last.y);
+
+      const r = p.lerp(40, 25, localC);
+      const g = p.lerp(35, 110, localC * 0.7);
+      const b = p.lerp(55, 160, localC);
+
+      const alpha = (70 + 170 * vis) * tip.fade;
+
+      p.stroke(r, g, b, alpha);
+      p.strokeWeight(p.constrain(tip.thick, 0.8, 4.2));
+
+      for (let i = 1; i < tip.pts.length; i++) {
+        const a0 = tip.pts[i - 1];
+        const a1 = tip.pts[i];
+        p.line(a0.x, a0.y, a1.x, a1.y);
+      }
+    }
+
+    p.pop();
+  }
 
   // ----------------------------
   // PERSISTENCE
@@ -121,8 +630,14 @@ new p5(function (p) {
         t: Date.now(),
         hunger,
         seedCount,
-        creature: { x: creature.x, y: creature.y, targetX: creature.targetX, facing: creature.facing },
-        flowers: flowers.map(f => ({ x: f.x, t: f.t, growRate: f.growRate, wob: f.wob }))
+        creature: {
+          x: creature.x, y: creature.y,
+          targetX: creature.targetX, targetY: creature.targetY,
+          facing: creature.facing
+        },
+        flowers: flowers.map(f => ({ x: f.x, t: f.t, growRate: f.growRate, wob: f.wob })),
+        corr: packCorr(),
+        corrW, corrH
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (e) { /* ignore */ }
@@ -160,6 +675,8 @@ new p5(function (p) {
         if (typeof data.creature.x === "number") creature.x = data.creature.x;
         if (typeof data.creature.y === "number") creature.y = data.creature.y;
         if (typeof data.creature.targetX === "number") creature.targetX = data.creature.targetX;
+        if (typeof data.creature.targetY === "number") creature.targetY = data.creature.targetY;
+        else creature.targetY = creature.y;
         if (typeof data.creature.facing === "number") creature.facing = data.creature.facing;
       }
 
@@ -173,6 +690,11 @@ new p5(function (p) {
         }));
       }
 
+      if (data.corr && typeof data.corrW === "number" && typeof data.corrH === "number") {
+        const ok = unpackCorr(data.corr, data.corrW, data.corrH);
+        if (!ok) initCorruption();
+      }
+
       if (typeof data.t === "number") {
         applyOfflineProgress(Date.now() - data.t);
       }
@@ -184,7 +706,7 @@ new p5(function (p) {
   }
 
   // ----------------------------
-  // NZ TIME (Pacific/Auckland)
+  // NZ TIME
   // ----------------------------
   function updateNZTime() {
     try {
@@ -218,7 +740,6 @@ new p5(function (p) {
       nz.month = mo;
 
     } catch (e) {
-      // Fallback to local time if Intl timezone not available
       const now = new Date();
       nz.minutes = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
       nz.daylight = 1;
@@ -238,7 +759,7 @@ new p5(function (p) {
   }
 
   // ----------------------------
-  // WEATHER (live if possible, else sim)
+  // WEATHER
   // ----------------------------
   function weatherCodeToDesc(code) {
     if (code === 0) return "Clear";
@@ -254,17 +775,16 @@ new p5(function (p) {
     return "Weather";
   }
   function isRainy() {
-    return [51,53,55,61,63,65,80,81,82,95,96,99].includes(weather.code);
+    return [51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99].includes(weather.code);
   }
   function isFoggy() {
     return weather.code === 45 || weather.code === 48;
   }
   function isStormy() {
-    return [95,96,99].includes(weather.code);
+    return [95, 96, 99].includes(weather.code);
   }
 
   function applySimWeather() {
-    // Deterministic simulated “NZ-like” weather using NZ time + month
     const winter = (nz.month >= 6 && nz.month <= 8);
     const evening = (nz.minutes > 17 * 60 || nz.minutes < 7 * 60);
 
@@ -320,14 +840,11 @@ new p5(function (p) {
   }
 
   function updateWeather() {
-    // If running from file://, many browsers block fetch → always sim
     const proto = window.location.protocol;
     if (proto !== "http:" && proto !== "https:") {
       applySimWeather();
       return;
     }
-
-    // live fetch periodically
     if (Date.now() - weather.lastFetch > WEATHER_REFRESH_MS) {
       fetchLiveWeather();
     }
@@ -339,6 +856,7 @@ new p5(function (p) {
   function enterIdle() {
     state = "idle";
     stateTimer = 0;
+    clickMoveActive = false;
 
     const nightBoost = nz.isNight ? 1.25 : 1.0;
     const minT = p.map(hunger, 0, 100, 150, 70) * nightBoost;
@@ -349,6 +867,7 @@ new p5(function (p) {
   function enterWalking() {
     state = "walking";
     stateTimer = 0;
+    clickMoveActive = false;
 
     const nightBoost = nz.isNight ? 1.15 : 1.0;
     const minT = p.map(hunger, 0, 100, 240, 130) * nightBoost;
@@ -356,6 +875,7 @@ new p5(function (p) {
     targetTimer = p.int(p.random(minT, maxT));
 
     creature.targetX = p.random(150, p.width - 150);
+    creature.targetY = creature.y;
     creature.facing = creature.targetX > creature.x ? 1 : -1;
   }
 
@@ -382,12 +902,22 @@ new p5(function (p) {
     if (state === "walking") {
       const baseWalkSpeed = p.map(hunger, 0, 100, 0.028, 0.05);
       const nightSlow = p.lerp(0.85, 1.0, nz.daylight);
+
       creature.x += (creature.targetX - creature.x) * baseWalkSpeed * nightSlow;
+      creature.y += (creature.targetY - creature.y) * baseWalkSpeed * 0.9 * nightSlow;
+
+      creature.x = p.constrain(creature.x, 80, p.width - 80);
+      creature.y = p.constrain(creature.y, 80, groundY() - 40);
 
       const baseLegSpeed = p.map(hunger, 0, 100, 0.10, 0.17);
       legPhase += baseLegSpeed * nightSlow;
 
-      if (stateTimer > targetTimer) enterIdle();
+      if (clickMoveActive) {
+        const d = p.dist(creature.x, creature.y, creature.targetX, creature.targetY);
+        if (d < 8) enterIdle();
+      } else {
+        if (stateTimer > targetTimer) enterIdle();
+      }
     }
 
     if (state === "pecking") {
@@ -404,7 +934,7 @@ new p5(function (p) {
   }
 
   // ----------------------------
-  // SCENE DRAW (Sky / Weather / Ground)
+  // SCENE DRAW
   // ----------------------------
   function drawSky() {
     const d = nz.daylight;
@@ -425,7 +955,6 @@ new p5(function (p) {
       p.rect(0, y, p.width, 4);
     }
 
-    // stars at night
     if (d < 0.5) {
       const nightAmt = p.map(d, 0.5, 0, 0, 1);
       p.noStroke();
@@ -486,14 +1015,17 @@ new p5(function (p) {
     p.rect(0, gy, p.width, GROUND_H);
 
     const d = nz.daylight;
-    let grassCol = p.lerpColor(p.color(55, 95, 70), p.color(90, 150, 80), d);
-    if (isRainy()) grassCol = p.lerpColor(grassCol, p.color(55, 140, 90), 0.25);
+    let baseGrass = p.lerpColor(p.color(55, 95, 70), p.color(90, 150, 80), d);
+    if (isRainy()) baseGrass = p.lerpColor(baseGrass, p.color(55, 140, 90), 0.25);
 
     for (let x = 0; x < p.width; x += 8) {
       const bladeH = 20 + p.noise(x * 0.02, chaosTime * 0.6) * 30;
       const sway = p.noise(x * 0.01, chaosTime * 0.8) * 12 - 6;
 
-      p.fill(grassCol);
+      const c = sampleCorr01(x, gy - 20);
+      const sick = p.lerpColor(baseGrass, p.color(65, 90, 115), p.constrain(c * 0.85, 0, 0.85));
+
+      p.fill(sick);
       p.beginShape();
       p.vertex(x, gy);
       p.vertex(x + sway, gy - bladeH);
@@ -510,9 +1042,14 @@ new p5(function (p) {
       x,
       y: groundY(),
       t: 0,
-      growRate: p.random(0.06, 0.11), // ~9–16 sec
+      growRate: p.random(0.06, 0.11),
       wob: p.random(1000)
     });
+
+    // planting cleans & kills nearby roots
+    purifyCorr(x, groundY() - 20, 120, 220);
+    purgeRoots(x, groundY() - 20, 120);
+
     saveState();
   }
 
@@ -604,7 +1141,129 @@ new p5(function (p) {
   }
 
   // ----------------------------
-  // CHAOS BODY SHAPES (your original look)
+  // CLUTTER (builds over time)
+  // ----------------------------
+  function spawnClutter(count) {
+    if (clutterBits.length > CLUTTER_CAP) return;
+
+    for (let i = 0; i < count; i++) {
+      if (clutterBits.length > CLUTTER_CAP) break;
+
+      const a = p.random(p.TWO_PI);
+      const sp = p.random(50, 340);
+      clutterBits.push({
+        x: p.random(p.width),
+        y: p.random(groundY()),
+        vx: p.cos(a) * sp,
+        vy: p.sin(a) * sp,
+        r: p.random(6, 22),
+        rot: p.random(p.TWO_PI),
+        vr: p.random(-4, 4),
+        life: p.random(1.2, 5.0),
+        col: p.random() < 0.5 ? 0 : 1
+      });
+    }
+  }
+
+  function updateClutter(dt) {
+    for (let i = clutterBits.length - 1; i >= 0; i--) {
+      const b = clutterBits[i];
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.vx *= 0.988;
+      b.vy *= 0.988;
+      b.rot += b.vr * dt;
+
+      if (b.x < -50) b.x = p.width + 50;
+      if (b.x > p.width + 50) b.x = -50;
+      if (b.y < -50) b.y = groundY() + 50;
+      if (b.y > groundY() + 50) b.y = -50;
+
+      b.life -= dt;
+      if (b.life <= 0) clutterBits.splice(i, 1);
+    }
+  }
+
+  function drawClutter() {
+    if (!clutterBits.length) return;
+
+    const c1 = p.color(220, 170, 80);
+    const c2 = p.color(235, 195, 120);
+
+    const darkness = p.map(overloadLevel, 0, 1, 0, 55);
+    p.noStroke();
+    p.fill(0, darkness);
+    p.rect(0, 0, p.width, groundY());
+
+    for (const b of clutterBits) {
+      const a = p.constrain(p.map(b.life, 0, 5.0, 0, 160), 0, 160);
+      const base = (b.col === 0) ? c1 : c2;
+
+      p.push();
+      p.translate(b.x, b.y);
+      p.rotate(b.rot);
+
+      p.noStroke();
+      p.fill(p.red(base), p.green(base), p.blue(base), a);
+      p.ellipse(0, 0, b.r * 1.2, b.r);
+
+      p.fill(245, 200, 60, a);
+      p.triangle(b.r * 0.4, 0, b.r * 1.1, b.r * 0.15, b.r * 1.1, -b.r * 0.15);
+
+      p.pop();
+    }
+
+    const lines = Math.floor(p.map(overloadLevel, 0, 1, 0, 18));
+    if (lines > 0) {
+      p.stroke(0, 45);
+      p.strokeWeight(2);
+      for (let i = 0; i < lines; i++) {
+        p.line(p.random(p.width), p.random(groundY()), p.random(p.width), p.random(groundY()));
+      }
+      p.noStroke();
+    }
+  }
+
+  function explodeAndRespawn() {
+    lightning = Math.max(lightning, 1);
+    spawnExplosion(creature.x, creature.y - 20);
+
+    respawning = true;
+    respawnT = RESPAWN_SECONDS;
+
+    overloadTimer = 0;
+    overloadLevel = 0;
+    clutterBits.length = 0;
+
+    dragging = false;
+    draggingSeed = false;
+    clickMoveActive = false;
+  }
+
+  function respawnCreature() {
+    respawning = false;
+    respawnT = 0;
+
+    creature.x = p.random(120, p.width - 120);
+    creature.y = p.random(120, groundY() - 60);
+    creature.targetX = creature.x;
+    creature.targetY = creature.y;
+    creature.facing = p.random() < 0.5 ? -1 : 1;
+
+    hunger = 0;
+    overloadTimer = 0;
+    overloadLevel = 0;
+
+    // cleanse burst + kill roots
+    purifyCorr(creature.x, creature.y, 240, 255);
+    purgeRoots(creature.x, creature.y, 240);
+
+    enterIdle();
+    spawnExplosion(creature.x, creature.y - 25);
+  }
+
+  // ----------------------------
+  // CHAOS BODY SHAPES
   // ----------------------------
   function noisyEllipse(x, y, w, h, chaos) {
     p.beginShape();
@@ -622,60 +1281,133 @@ new p5(function (p) {
   }
 
   // ----------------------------
-  // CREATURE
+  // CREATURE (now changes with corruption)
   // ----------------------------
   function drawCreature(c) {
+    // hunger-driven chaos
     let chaos = p.map(hunger, 45, 100, 0, 1);
     chaos = p.constrain(chaos, 0, 1);
 
-    const jitterX = (p.noise(chaosTime, 0) - 0.5) * chaos * 12;
-    const jitterY = (p.noise(0, chaosTime) - 0.5) * chaos * 12;
+    // world corruption under chicken + hunger
+    const groundCorrupt = sampleCorr01(c.x, c.y);
+    const corrupt = p.constrain(Math.max(groundCorrupt, chaos), 0, 1);
+
+    // keep your original style: corruption changes are smooth + layered
+    const shapeChaos = p.constrain(chaos * 0.85 + corrupt * 0.35, 0, 1);
+
+    // reduce eye-hurting jitter: still moves, but smoothly
+    const jx = (p.noise(chaosTime * 0.8, 0) - 0.5) * shapeChaos * 10;
+    const jy = (p.noise(0, chaosTime * 0.8) - 0.5) * shapeChaos * 10;
 
     p.push();
-    p.translate(c.x + jitterX, c.y + jitterY);
+    p.translate(c.x + jx, c.y + jy);
     p.scale(c.facing, 1);
+
+    // color shift: warm -> sickly/ashy
+    const baseBodyA = p.color(220, 170, 80);
+    const baseBodyB = p.color(235, 195, 120);
+    const sickBodyA = p.color(145, 175, 135);
+    const sickBodyB = p.color(120, 150, 160);
+
+    const colA = p.lerpColor(baseBodyA, sickBodyA, corrupt * 0.75);
+    const colB = p.lerpColor(baseBodyB, sickBodyB, corrupt * 0.75);
 
     // BODY
     p.noStroke();
-    p.fill(220, 170, 80);
-    chaosEllipse(0, 20, 220, 160, chaos);
+    p.fill(colA);
+    chaosEllipse(0, 20, 220, 160, shapeChaos);
 
-    p.fill(235, 195, 120);
-    chaosEllipse(-20, 30, 160, 120, chaos);
+    p.fill(colB);
+    chaosEllipse(-20, 30, 160, 120, shapeChaos);
+
+    // corruption bruises/spots
+    if (corrupt > 0.15) {
+      const spots = 5 + Math.floor(corrupt * 9);
+      for (let i = 0; i < spots; i++) {
+        const sx = p.noise(chaosTime * 0.2, i * 33.1) * 120 - 60;
+        const sy = p.noise(i * 18.2, chaosTime * 0.2) * 80 - 20;
+        const sr = p.lerp(8, 22, p.noise(i * 7.7, chaosTime * 0.3)) * (0.6 + corrupt);
+        p.fill(40, 35, 70, 45 * corrupt);
+        p.ellipse(sx, sy + 25, sr * 1.1, sr);
+      }
+    }
 
     // TAIL
-    p.fill(210, 160, 90);
-    chaosEllipse(-120, -10, 90, 80, chaos);
-    chaosEllipse(-110, -40, 70, 60, chaos);
-    chaosEllipse(-90, -60, 50, 40, chaos);
+    const baseTail = p.color(210, 160, 90);
+    const sickTail = p.color(110, 120, 150);
+    p.fill(p.lerpColor(baseTail, sickTail, corrupt * 0.8));
+    chaosEllipse(-120, -10, 90, 80, shapeChaos);
+    chaosEllipse(-110, -40, 70, 60, shapeChaos);
+    chaosEllipse(-90, -60, 50, 40, shapeChaos);
 
     // HEAD
     const peckAmt = (state === "pecking") ? p.constrain(p.sin(peckPhase), 0, 1) : 0;
 
     p.push();
     p.translate(95 + peckAmt * 16, -40);
-    p.rotate(p.radians(peckAmt * (18 + chaos * 30)));
-    p.translate(0, peckAmt * (24 + chaos * 20));
+    p.rotate(p.radians(peckAmt * (18 + shapeChaos * 30)));
+    p.translate(0, peckAmt * (24 + shapeChaos * 20));
 
-    p.fill(220, 170, 80);
-    chaosEllipse(0, 0, 80, 70, chaos);
+    p.fill(p.lerpColor(baseBodyA, sickBodyA, corrupt * 0.8));
+    chaosEllipse(0, 0, 80, 70, shapeChaos);
 
-    p.fill(200, 40, 40);
+    // comb goes darker with corruption
+    p.fill(p.lerpColor(p.color(200, 40, 40), p.color(90, 25, 70), corrupt * 0.9));
     p.triangle(0, -25, -15, -45, 15, -45);
 
-    p.fill(245, 200, 60);
+    // beak dulls
+    p.fill(p.lerpColor(p.color(245, 200, 60), p.color(160, 165, 120), corrupt * 0.85));
     p.triangle(35, 0, 70, 8, 35, 15);
 
-    p.fill(0);
-    p.circle(5, -5, 6);
-    p.pop();
+    // eye: turns “infected glow”
+    if (corrupt < 0.35) {
+      p.fill(0);
+      p.circle(5, -5, 6);
+    } else {
+      const glow = p.constrain((corrupt - 0.35) / 0.65, 0, 1);
+      p.noStroke();
+      p.fill(170, 255, 215, 120 * glow);
+      p.circle(5, -5, 14 * glow);
+      p.fill(10, 10, 10);
+      p.circle(5, -5, p.lerp(6, 3, glow));
+      p.fill(140, 255, 200, 220 * glow);
+      p.circle(5, -5, 5 * glow);
+    }
 
-    // LEGS
-    p.stroke(200, 170, 60);
+    // little face veins
+    if (corrupt > 0.35) {
+      p.stroke(35, 25, 70, 95 * corrupt);
+      p.strokeWeight(2);
+      for (let i = 0; i < 5; i++) {
+        const ang = p.noise(i * 2.1, chaosTime * 0.5) * p.TWO_PI;
+        p.line(0, -2, p.cos(ang) * 16, p.sin(ang) * 10);
+      }
+      p.noStroke();
+    }
+
+    p.pop(); // end head
+
+    // BODY VEINS (roots-like lines on chicken)
+    if (corrupt > 0.25) {
+      p.stroke(35, 25, 70, 85 * corrupt);
+      p.strokeWeight(2);
+      const veinLines = 8 + Math.floor(corrupt * 14);
+      for (let i = 0; i < veinLines; i++) {
+        const x1 = p.noise(i * 10.1, chaosTime * 0.25) * 160 - 80;
+        const y1 = p.noise(chaosTime * 0.25, i * 12.7) * 110 - 35;
+        const ang = p.noise(i * 9.3, chaosTime * 0.4) * p.TWO_PI * 2;
+        const len = p.lerp(10, 34, p.noise(i * 4.4, chaosTime * 0.33)) * (0.6 + corrupt);
+        p.line(x1, y1 + 30, x1 + Math.cos(ang) * len, y1 + 30 + Math.sin(ang) * len * 0.6);
+      }
+      p.noStroke();
+    }
+
+    // LEGS (unchanged look; slight discolor only)
+    p.stroke(p.lerpColor(p.color(200, 170, 60), p.color(140, 150, 150), corrupt * 0.7));
     p.strokeWeight(4);
 
     const swing = (state === "walking") ? p.sin(legPhase) * 0.5 : 0;
-    const legJitter = chaos * 2;
+    const legJitter = shapeChaos * 2;
 
     p.push();
     p.translate(-20 + p.random(-legJitter, legJitter), 80);
@@ -695,7 +1427,7 @@ new p5(function (p) {
     p.line(0, 32, 0, 42);
     p.pop();
 
-    // GLITCH LINES
+    // GLITCH LINES (keep your original chaos logic)
     if (chaos > 0.5) {
       p.stroke(0, 40);
       for (let i = 0; i < chaos * 10; i++) {
@@ -707,7 +1439,7 @@ new p5(function (p) {
   }
 
   // ----------------------------
-  // HUD (BIGGER / CLEARER)
+  // HUD
   // ----------------------------
   function drawPanel(x, y, w, h) {
     p.noStroke();
@@ -719,10 +1451,9 @@ new p5(function (p) {
     p.rect(x, y, w, h, 14);
   }
 
-function seedIconPos() {
-  // moved left so it never overlaps the number
-  return { x: p.width - 92, y: 42 };
-}
+  function seedIconPos() {
+    return { x: p.width - 92, y: 42 };
+  }
 
   function drawHUD() {
     // Hunger (top-left)
@@ -755,6 +1486,19 @@ function seedIconPos() {
     p.textSize(14);
     p.text(Math.round(hunger) + "%", bx + bw, by + bh / 2);
 
+    // status line
+    p.fill(255, 220);
+    p.textAlign(p.LEFT, p.TOP);
+    p.textSize(12);
+    if (respawning) {
+      p.text("RESPAWN IN " + Math.ceil(respawnT) + "s", 28, 82);
+    } else if (hunger >= 100) {
+      const remain = Math.max(0, Math.ceil(OVERLOAD_SECONDS - overloadTimer));
+      p.text("OVERLOAD IN " + remain + "s", 28, 82);
+    } else if (overloadLevel > 0.02) {
+      p.text("CLUTTER " + Math.round(overloadLevel * 100) + "%", 28, 82);
+    }
+
     // Seeds + Weather (top-right)
     drawPanel(p.width - 14 - 360, 14, 360, 112);
 
@@ -768,34 +1512,30 @@ function seedIconPos() {
     p.textSize(28);
     p.text(seedCount, p.width - 28, 16);
 
-// seed icon (clickable) – redesigned
-const pos = seedIconPos();
-p.push();
-p.translate(pos.x, pos.y);
+    // seed icon (pouch + sprout)
+    const pos = seedIconPos();
+    p.push();
+    p.translate(pos.x, pos.y);
 
-// seed pouch
-p.noStroke();
-p.fill(90, 65, 40);
-p.ellipse(0, 4, 26, 28);
+    p.noStroke();
+    p.fill(90, 65, 40);
+    p.ellipse(0, 4, 26, 28);
 
-// pouch flap
-p.fill(70, 50, 30);
-p.arc(0, -2, 26, 18, p.PI, 0);
+    p.fill(70, 50, 30);
+    p.arc(0, -2, 26, 18, p.PI, 0);
 
-// sprout stem
-p.stroke(70, 140, 90);
-p.strokeWeight(3);
-p.line(0, -6, 0, -18);
+    p.stroke(70, 140, 90);
+    p.strokeWeight(3);
+    p.line(0, -6, 0, -18);
 
-// sprout leaves
-p.noStroke();
-p.fill(90, 180, 120);
-p.ellipse(-6, -18, 10, 6);
-p.ellipse(6, -18, 10, 6);
+    p.noStroke();
+    p.fill(90, 180, 120);
+    p.ellipse(-6, -18, 10, 6);
+    p.ellipse(6, -18, 10, 6);
 
-p.pop();
+    p.pop();
 
-    // Weather line
+    // Weather
     p.textAlign(p.LEFT, p.TOP);
     p.textSize(13);
     p.fill(255, 220);
@@ -813,31 +1553,28 @@ p.pop();
     p.text("NZ " + hh + ":" + mmStr, p.width - 14 - 360 + 16, 92);
   }
 
-function drawDraggedSeed() {
-  p.push();
-  p.translate(seedDrag.x, seedDrag.y);
+  function drawDraggedSeed() {
+    p.push();
+    p.translate(seedDrag.x, seedDrag.y);
 
-  // pouch
-  p.noStroke();
-  p.fill(90, 65, 40);
-  p.ellipse(0, 6, 30, 32);
+    p.noStroke();
+    p.fill(90, 65, 40);
+    p.ellipse(0, 6, 30, 32);
 
-  // flap
-  p.fill(70, 50, 30);
-  p.arc(0, 0, 30, 20, p.PI, 0);
+    p.fill(70, 50, 30);
+    p.arc(0, 0, 30, 20, p.PI, 0);
 
-  // sprout
-  p.stroke(70, 140, 90);
-  p.strokeWeight(3);
-  p.line(0, -2, 0, -18);
+    p.stroke(70, 140, 90);
+    p.strokeWeight(3);
+    p.line(0, -2, 0, -18);
 
-  p.noStroke();
-  p.fill(90, 180, 120);
-  p.ellipse(-6, -18, 10, 6);
-  p.ellipse(6, -18, 10, 6);
+    p.noStroke();
+    p.fill(90, 180, 120);
+    p.ellipse(-6, -18, 10, 6);
+    p.ellipse(6, -18, 10, 6);
 
-  p.pop();
-}
+    p.pop();
+  }
 
   // ----------------------------
   // SETUP
@@ -850,15 +1587,28 @@ function drawDraggedSeed() {
     creature = createCreature(p.width / 2, p.height / 2);
 
     updateNZTime();
+
+    initCorruption();
     loadState();
 
-    // keep inside bounds
+    // if corruption loaded with different dims, resample to current
+    const targetW = Math.max(1, Math.ceil(p.width / CORR_CELL));
+    const targetH = Math.max(1, Math.ceil(groundY() / CORR_CELL));
+    if (corr && (corrW !== targetW || corrH !== targetH)) {
+      const old = corr;
+      const oldW = corrW, oldH = corrH;
+      initCorruption();
+      corr = resampleCorr(old, oldW, oldH, corrW, corrH);
+      corrNext = new Uint8Array(corrW * corrH);
+    }
+
     creature.x = p.constrain(creature.x, 80, p.width - 80);
     creature.y = p.constrain(creature.y, 80, groundY() - 40);
+    creature.targetX = p.constrain(creature.targetX, 80, p.width - 80);
+    creature.targetY = p.constrain(creature.targetY, 80, groundY() - 40);
 
     enterIdle();
 
-    // initial weather
     applySimWeather();
     updateWeather();
   };
@@ -874,32 +1624,73 @@ function drawDraggedSeed() {
     updateWeather();
     if (weather.mode === "sim") applySimWeather();
 
-    // Background
     drawSky();
-
-    // Weather FX behind scene
     updateAndDrawWeatherFX(dt);
 
-    // Hunger changes over time, including with drag & with night/weather effects
+    // Hunger changes
     let rate = HUNGER_PER_SEC;
-    rate *= p.lerp(0.72, 1.0, nz.daylight); // slower at night
+    rate *= p.lerp(0.72, 1.0, nz.daylight);
     if (dragging) rate += DRAG_HUNGER_PER_SEC;
     if (isStormy()) rate *= 1.08;
 
-    hunger = p.constrain(hunger + rate * dt, 0, 100);
+    if (respawning) {
+      hunger = 0;
+    } else {
+      hunger = p.constrain(hunger + rate * dt, 0, 100);
+    }
 
-    if (!dragging && !draggingSeed) updateState();
+    // ---- OVERLOAD TIMELINE ----
+    if (!respawning) {
+      if (hunger >= 100) {
+        overloadTimer += dt;
+      } else {
+        overloadTimer = Math.max(0, overloadTimer - dt * 2.2);
+      }
+
+      overloadLevel = p.constrain(overloadTimer / OVERLOAD_SECONDS, 0, 1);
+
+      if (overloadLevel > 0.001) {
+        const spawnPerSec = p.lerp(10, 220, overloadLevel);
+        spawnClutter(Math.floor(spawnPerSec * dt));
+      }
+
+      if (overloadTimer >= OVERLOAD_SECONDS) {
+        explodeAndRespawn();
+      }
+    } else {
+      overloadTimer = 0;
+      overloadLevel = 0;
+    }
+
+    // corruption + roots update
+    updateCorruption(dt);
+    updateRoots(dt);
+    drawCorruptionOverlay();
+
+    if (!dragging && !draggingSeed && !respawning) updateState();
 
     updateFlowers(dt);
     updateParticles();
+    updateClutter(dt);
 
     drawGrass();
+    drawRoots();   // roots on top of ground
     drawFlowers();
-    drawCreature(creature);
+
+    if (!respawning) drawCreature(creature);
+
     drawParticles();
+
+    if (!respawning && overloadLevel > 0.01) drawClutter();
 
     drawHUD();
     if (draggingSeed) drawDraggedSeed();
+
+    // Respawn countdown
+    if (respawning) {
+      respawnT -= dt;
+      if (respawnT <= 0) respawnCreature();
+    }
 
     if (p.frameCount % 120 === 0) saveState();
   };
@@ -917,10 +1708,15 @@ function drawDraggedSeed() {
       return;
     }
 
-    if (p.dist(p.mouseX, p.mouseY, creature.x, creature.y) < PICK_RADIUS) {
+    if (!respawning && p.dist(p.mouseX, p.mouseY, creature.x, creature.y) < PICK_RADIUS) {
       dragging = true;
       dragOffsetX = creature.x - p.mouseX;
       dragOffsetY = creature.y - p.mouseY;
+      return;
+    }
+
+    if (!respawning && !draggingSeed && !dragging) {
+      setClickTarget(p.mouseX, p.mouseY);
     }
   };
 
@@ -930,10 +1726,13 @@ function drawDraggedSeed() {
       seedDrag.y = p.mouseY;
     }
 
-    if (dragging) {
+    if (dragging && !respawning) {
       creature.x = p.mouseX + dragOffsetX;
       creature.y = p.mouseY + dragOffsetY;
       creature.y = p.constrain(creature.y, 60, groundY() - 20);
+
+      creature.targetX = creature.x;
+      creature.targetY = creature.y;
     }
   };
 
@@ -942,8 +1741,13 @@ function drawDraggedSeed() {
       let used = false;
 
       // feed chicken
-      if (p.dist(p.mouseX, p.mouseY, creature.x, creature.y) < 120) {
+      if (!respawning && p.dist(p.mouseX, p.mouseY, creature.x, creature.y) < 120) {
         hunger = Math.max(0, hunger - FEED_AMOUNT);
+
+        // feeding purifies corruption + kills roots near chicken
+        purifyCorr(creature.x, creature.y - 10, CORR_PURIFY_RADIUS, 255);
+        purgeRoots(creature.x, creature.y - 10, CORR_PURIFY_RADIUS);
+
         used = true;
       }
       // plant on ground
@@ -958,16 +1762,33 @@ function drawDraggedSeed() {
       }
 
       draggingSeed = false;
-      enterIdle();
+      if (!respawning) enterIdle();
     }
 
     dragging = false;
   };
 
   p.windowResized = function () {
+    const oldCorr = corr;
+    const oldW = corrW;
+    const oldH = corrH;
+
     p.resizeCanvas(p.windowWidth - 40, p.windowHeight - 40);
+
     for (const f of flowers) f.y = groundY();
-    creature.y = p.constrain(creature.y, 80, groundY() - 40);
+    if (creature) creature.y = p.constrain(creature.y, 80, groundY() - 40);
+
+    initCorruption();
+    if (oldCorr) {
+      corr = resampleCorr(oldCorr, oldW, oldH, corrW, corrH);
+      corrNext = new Uint8Array(corrW * corrH);
+    }
+
+    if (creature) {
+      creature.targetX = p.constrain(creature.targetX, 80, p.width - 80);
+      creature.targetY = p.constrain(creature.targetY, 80, groundY() - 40);
+    }
+
     saveState();
   };
 
