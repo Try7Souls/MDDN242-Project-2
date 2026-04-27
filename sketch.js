@@ -48,7 +48,7 @@ new p5(function (p) {
   const GROUND_H = 60;
   const PICK_RADIUS = 140;
 
-  const HUNGER_PER_SEC = 1.2;
+  const HUNGER_PER_SEC = 0.6;
   const DRAG_HUNGER_PER_SEC = 2.6;
   const FEED_AMOUNT = 25;
 
@@ -187,12 +187,9 @@ new p5(function (p) {
     corrNext = new Uint8Array(corrW * corrH);
   }
 
-  function sampleCorr01(x, y) {
-    if (!corr) return 0;
-    const ix = p.constrain(Math.floor(x / CORR_CELL), 0, corrW - 1);
-    const iy = p.constrain(Math.floor(y / CORR_CELL), 0, corrH - 1);
-    return corr[corrIndex(ix, iy)] / 255;
-  }
+function sampleCorr01(x, y) {
+  return 0; // ✅ ground corruption disabled
+}
 
   function addCorrBlob(x, y, radius, amountBytes) {
     if (!corr) return;
@@ -1042,13 +1039,9 @@ new p5(function (p) {
       x,
       y: groundY(),
       t: 0,
-      growRate: p.random(0.06, 0.11),
+      growRate: p.random(0.06, 0.09),
       wob: p.random(1000)
     });
-
-    // planting cleans & kills nearby roots
-    purifyCorr(x, groundY() - 20, 120, 220);
-    purgeRoots(x, groundY() - 20, 120);
 
     saveState();
   }
@@ -1663,9 +1656,9 @@ new p5(function (p) {
     }
 
     // corruption + roots update
-    updateCorruption(dt);
-    updateRoots(dt);
-    drawCorruptionOverlay();
+    //updateCorruption(dt);
+    //updateRoots(dt);
+    //drawCorruptionOverlay();
 
     if (!dragging && !draggingSeed && !respawning) updateState();
 
