@@ -1,14 +1,6 @@
 (function () {
   const box = document.createElement("pre");
-  box.id = "debug-overlay";
-  box.style.cssText = `
-    position:fixed; left:12px; bottom:12px; max-width:calc(100vw - 24px);
-    max-height:40vh; overflow:auto; z-index:99999; margin:0;
-    background:rgba(120,0,0,0.92); color:#fff; padding:10px 12px;
-    border-radius:10px; font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    box-shadow:0 10px 25px rgba(0,0,0,0.35); display:none;
-    white-space:pre-wrap;
-  `;
+
   document.addEventListener("DOMContentLoaded", () => document.body.appendChild(box));
 
   function show(msg) {
@@ -57,8 +49,6 @@ new p5(function (p) {
   const RESPAWN_SECONDS = 10;
   const CLUTTER_CAP = 1600;
 
-  // ---- WORLD CORRUPTION (grid) ----
-  // corruption is 0..1 stored as bytes 0..255
   const CORR_CELL = 22;
   const CORR_START_HUNGER = 55;
   const CORR_FULL_HUNGER = 100;
@@ -104,6 +94,10 @@ new p5(function (p) {
   let seedCount = 5;
   let draggingSeed = false;
   let seedDrag = { x: 0, y: 0 };
+  // ---- SEED REFILL (when at 0, wait 30s to get 1 back) ----
+  let seedRefillTimer = 0;
+  const SEED_REFILL_DELAY = 30;
+
 
   let flowers = [];
   let particles = [];
@@ -155,30 +149,48 @@ new p5(function (p) {
     precip: 0
   };
 
-// ============================
-// ACHIEVEMENTS / SKINS (evil themed)
-// Survive: 5m, 15m, 1h (set to 0 while testing). Click unlocked to equip; click again to unequip.
-// Saved in localStorage.
-// ============================
-let aliveTime = 0; // seconds alive since last respawn
-let achievementsOpen = false;
+  // ============================
+  // MIC STARTLE 
+  // ============================
+  let micCtx = null;
+  let micAnalyser = null;
+  let micData = null;
+  let micSmooth = 0;
+  let micStarting = false;
 
-const achievements = [
-  { id: 'evil',    label: 'Evil Skin',    time: 300, unlocked: false, equipped: false },
-  { id: 'corrupt', label: 'Corrupt Skin', time: 900, unlocked: false, equipped: false },
-  { id: 'chaotic', label: 'Chaotic Skin', time: 3600, unlocked: false, equipped: false }
-];
+  let startledTimer = 0;
+  let startleCooldownTimer = 0;
 
-function equippedAchievement() {
-  for (const a of achievements) if (a.equipped) return a;
-  return null;
-}
+  const STARTLE_THRESHOLD = 0.12;
+  const STARTLE_DURATION = 2.6;
+  const STARTLE_COOLDOWN = 2.0;
+  const STARTLE_HUNGER_MULT = 3.0;
+  const STARTLE_SPEED_MULT = 1.9;
 
-function activeSkin() {
-  const a = equippedAchievement();
-  return a ? a.id : 'normal';
-}
 
+  // ============================
+  // ACHIEVEMENTS / SKINS (evil themed)
+  // Click unlocked to equip; click again to unequip. Saved in localStorage.
+  // (Times set to 0 for testing — change later to 300/900/3600)
+  // ============================
+  let aliveTime = 0;
+  let achievementsOpen = false;
+
+  const achievements = [
+    { id: 'evil',    label: 'Evil Skin',    time: 0, unlocked: false, equipped: false },
+    { id: 'corrupt', label: 'Corrupt Skin', time: 0, unlocked: false, equipped: false },
+    { id: 'chaotic', label: 'Chaotic Skin', time: 0, unlocked: false, equipped: false }
+  ];
+
+  function equippedAchievement() {
+    for (const a of achievements) if (a.equipped) return a;
+    return null;
+  }
+
+  function activeSkin() {
+    const a = equippedAchievement();
+    return a ? a.id : 'normal';
+  }
   // ----------------------------
   // HELPERS
   // ----------------------------
@@ -200,8 +212,60 @@ function activeSkin() {
   }
 
   // ----------------------------
-  // WORLD CORRUPTION (grid)
+  // MIC STARTLE
   // ----------------------------
+  function initMicSafe() {
+    if (micCtx || micAnalyser || micStarting) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+    micStarting = true;
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(stream => {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) throw new Error('No AudioContext');
+        micCtx = new AudioCtx();
+        const src = micCtx.createMediaStreamSource(stream);
+        micAnalyser = micCtx.createAnalyser();
+        micAnalyser.fftSize = 512;
+        micData = new Uint8Array(micAnalyser.fftSize);
+        src.connect(micAnalyser);
+      })
+      .catch(() => {
+        micCtx = null;
+        micAnalyser = null;
+        micData = null;
+      })
+      .finally(() => {
+        micStarting = false;
+      });
+  }
+
+  function updateMicStartle(dt) {
+    if (startleCooldownTimer > 0) startleCooldownTimer -= dt;
+    if (startledTimer > 0) startledTimer -= dt;
+    if (!micAnalyser || !micData) return;
+
+    micAnalyser.getByteTimeDomainData(micData);
+    let sum = 0;
+    for (let i = 0; i < micData.length; i++) {
+      const v = (micData[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / micData.length);
+    micSmooth = p.lerp(micSmooth, rms, 0.18);
+
+    if (micSmooth > STARTLE_THRESHOLD && startledTimer <= 0 && startleCooldownTimer <= 0 && !respawning && !dragging && !draggingSeed) {
+      startledTimer = STARTLE_DURATION;
+      startleCooldownTimer = STARTLE_COOLDOWN;
+      clickMoveActive = false;
+      state = 'walking';
+      stateTimer = 0;
+      targetTimer = 999999;
+      creature.targetX = p.random(150, p.width - 150);
+      creature.targetY = creature.y;
+      creature.facing = creature.targetX > creature.x ? 1 : -1;
+    }
+  }
+
   function corrIndex(ix, iy) { return ix + iy * corrW; }
 
   function initCorruption() {
@@ -373,7 +437,7 @@ function sampleCorr01(x, y) {
     const vis = p.constrain(0.25 * worldAmt + 0.85 * a, 0, 1);
     if (vis < 0.02) return;
 
-    // optional subtle haze (kept very light so it doesn't “change your style” too much)
+    // optional subtle haze
     p.push();
     p.noStroke();
     p.fill(25, 25, 40, 22 * vis);
@@ -649,8 +713,9 @@ function sampleCorr01(x, y) {
     try {
       const data = {
         t: Date.now(),
-  aliveTime,
-  achievements: achievements.map(a => ({ id: a.id, unlocked: a.unlocked, equipped: a.equipped })),
+      aliveTime,
+      seedRefillTimer,
+      achievements: achievements.map(a => ({ id: a.id, unlocked: a.unlocked, equipped: a.equipped })),
         hunger,
         seedCount,
         creature: {
@@ -694,16 +759,17 @@ function sampleCorr01(x, y) {
       if (typeof data.hunger === "number") hunger = data.hunger;
       if (typeof data.seedCount === "number") seedCount = data.seedCount;
 
-if (typeof data.aliveTime === 'number') aliveTime = data.aliveTime;
-if (Array.isArray(data.achievements)) {
-  for (const a of achievements) {
-    const s = data.achievements.find(o => o.id === a.id);
-    if (s) {
-      a.unlocked = !!s.unlocked;
-      a.equipped = !!s.equipped;
+    if (typeof data.aliveTime === 'number') aliveTime = data.aliveTime;
+    if (typeof data.seedRefillTimer === 'number') seedRefillTimer = data.seedRefillTimer;
+    if (Array.isArray(data.achievements)) {
+      for (const a of achievements) {
+        const s = data.achievements.find(o => o.id === a.id);
+        if (s) {
+          a.unlocked = !!s.unlocked;
+          a.equipped = !!s.equipped;
+        }
+      }
     }
-  }
-}
 
       if (data.creature) {
         if (typeof data.creature.x === "number") creature.x = data.creature.x;
@@ -934,7 +1000,15 @@ if (Array.isArray(data.achievements)) {
     }
 
     if (state === "walking") {
-      const baseWalkSpeed = p.map(hunger, 0, 100, 0.028, 0.05);
+      let baseWalkSpeed = p.map(hunger, 0, 100, 0.028, 0.05);
+      // STARTLE: panic sprint + jittery retarget
+      if (startledTimer > 0) {
+        baseWalkSpeed *= STARTLE_SPEED_MULT;
+        if (!clickMoveActive && p.random() < 0.03) {
+          creature.targetX = p.random(150, p.width - 150);
+          creature.facing = creature.targetX > creature.x ? 1 : -1;
+        }
+      }
       const nightSlow = p.lerp(0.85, 1.0, nz.daylight);
 
       creature.x += (creature.targetX - creature.x) * baseWalkSpeed * nightSlow;
@@ -943,7 +1017,8 @@ if (Array.isArray(data.achievements)) {
       creature.x = p.constrain(creature.x, 80, p.width - 80);
       creature.y = p.constrain(creature.y, 80, groundY() - 40);
 
-      const baseLegSpeed = p.map(hunger, 0, 100, 0.10, 0.17);
+      let baseLegSpeed = p.map(hunger, 0, 100, 0.10, 0.17);
+      if (startledTimer > 0) baseLegSpeed *= 1.35;
       legPhase += baseLegSpeed * nightSlow;
 
       if (clickMoveActive) {
@@ -1281,7 +1356,7 @@ if (Array.isArray(data.achievements)) {
     creature.facing = p.random() < 0.5 ? -1 : 1;
 
     hunger = 0;
-aliveTime = 0;
+    aliveTime = 0;
     overloadTimer = 0;
     overloadLevel = 0;
 
@@ -1322,18 +1397,18 @@ aliveTime = 0;
     // world corruption under chicken + hunger
     const groundCorrupt = sampleCorr01(c.x, c.y);
     let corrupt = p.constrain(Math.max(groundCorrupt, chaos), 0, 1);
-  const skin = activeSkin();
-  if (skin === 'corrupt') corrupt = p.constrain(corrupt + 0.28, 0, 1);
-  if (skin === 'evil') corrupt = p.constrain(corrupt + 0.12, 0, 1);
-  if (skin === 'chaotic') {
-    corrupt = p.constrain(corrupt + 0.18, 0, 1);
-    chaos = p.constrain(chaos + 0.35, 0, 1);
-  }
+    const skin = activeSkin();
+    if (skin === 'corrupt') corrupt = p.constrain(corrupt + 0.28, 0, 1);
+    if (skin === 'evil') corrupt = p.constrain(corrupt + 0.12, 0, 1);
+    if (skin === 'chaotic') {
+      corrupt = p.constrain(corrupt + 0.18, 0, 1);
+      chaos = p.constrain(chaos + 0.35, 0, 1);
+    }
 
-    // keep your original style: corruption changes are smooth + layered
+    
     const shapeChaos = p.constrain(chaos * 0.85 + corrupt * 0.35, 0, 1);
 
-    // reduce eye-hurting jitter: still moves, but smoothly
+    
     const jx = (p.noise(chaosTime * 0.8, 0) - 0.5) * shapeChaos * 10;
     const jy = (p.noise(0, chaosTime * 0.8) - 0.5) * shapeChaos * 10;
 
@@ -1341,32 +1416,32 @@ aliveTime = 0;
     p.translate(c.x + jx, c.y + jy);
     p.scale(c.facing, 1);
 
-    // color shift: warm -> sickly/ashy
+    // color shift: 
     let baseBodyA = p.color(220, 170, 80);
-  let baseBodyB = p.color(235, 195, 120);
-  let sickBodyA = p.color(145, 175, 135);
-  let sickBodyB = p.color(120, 150, 160);
+    let baseBodyB = p.color(235, 195, 120);
+    let sickBodyA = p.color(145, 175, 135);
+    let sickBodyB = p.color(120, 150, 160);
 
-  // SKIN PALETTES
-  if (skin === 'evil') {
-    baseBodyA = p.color(115, 25, 35);
-    baseBodyB = p.color(165, 45, 60);
-    sickBodyA = p.color(70, 15, 40);
-    sickBodyB = p.color(95, 25, 70);
-  } else if (skin === 'corrupt') {
-    baseBodyA = p.color(80, 130, 105);
-    baseBodyB = p.color(60, 110, 125);
-    sickBodyA = p.color(55, 150, 120);
-    sickBodyB = p.color(45, 120, 145);
-  } else if (skin === 'chaotic') {
-    const r = 140 + (p.noise(chaosTime * 0.9, 1) - 0.5) * 220;
-    const g = 140 + (p.noise(chaosTime * 0.9, 7) - 0.5) * 220;
-    const b = 140 + (p.noise(chaosTime * 0.9, 13) - 0.5) * 220;
-    baseBodyA = p.color(r, g, b);
-    baseBodyB = p.color(255 - r * 0.4, 255 - g * 0.4, 255 - b * 0.4);
-    sickBodyA = p.color(b, r, g);
-    sickBodyB = p.color(g, b, r);
-  }
+    // SKIN PALETTES
+    if (skin === 'evil') {
+      baseBodyA = p.color(115, 25, 35);
+      baseBodyB = p.color(165, 45, 60);
+      sickBodyA = p.color(70, 15, 40);
+      sickBodyB = p.color(95, 25, 70);
+    } else if (skin === 'corrupt') {
+      baseBodyA = p.color(80, 130, 105);
+      baseBodyB = p.color(60, 110, 125);
+      sickBodyA = p.color(55, 150, 120);
+      sickBodyB = p.color(45, 120, 145);
+    } else if (skin === 'chaotic') {
+      const r = 140 + (p.noise(chaosTime * 0.9, 1) - 0.5) * 220;
+      const g = 140 + (p.noise(chaosTime * 0.9, 7) - 0.5) * 220;
+      const b = 140 + (p.noise(chaosTime * 0.9, 13) - 0.5) * 220;
+      baseBodyA = p.color(r, g, b);
+      baseBodyB = p.color(255 - r * 0.4, 255 - g * 0.4, 255 - b * 0.4);
+      sickBodyA = p.color(b, r, g);
+      sickBodyB = p.color(g, b, r);
+    }
 
     const colA = p.lerpColor(baseBodyA, sickBodyA, corrupt * 0.75);
     const colB = p.lerpColor(baseBodyB, sickBodyB, corrupt * 0.75);
@@ -1417,49 +1492,49 @@ aliveTime = 0;
     // beak dulls
     p.fill(p.lerpColor(p.color(245, 200, 60), p.color(160, 165, 120), corrupt * 0.85));
     p.triangle(35, 0, 70, 8, 35, 15);
-  // eye: skin-driven
-  if (skin === 'evil') {
-    p.noStroke();
-    p.fill(255, 60, 60, 220);
-    p.circle(5, -5, 10);
-    p.fill(10, 0, 0);
-    p.circle(5, -5, 4);
-  } else if (skin === 'corrupt') {
-    const glow = p.constrain((corrupt - 0.15) / 0.85, 0, 1);
-    p.noStroke();
-    p.fill(120, 255, 220, 120 + 100 * glow);
-    p.circle(5, -5, 8 + 10 * glow);
-    p.fill(5, 10, 10);
-    p.circle(5, -5, 4);
-    p.fill(160, 255, 200, 220 * glow);
-    p.circle(6, -6, 3 + 2 * glow);
-  } else if (skin === 'chaotic') {
-    const pulse = 0.5 + 0.5 * p.sin(chaosTime * 9.0);
-    p.noStroke();
-    p.fill(255, 255, 255, 210);
-    p.circle(5, -5, 9 + 6 * pulse);
-    p.fill(0, 0, 0, 230);
-    p.circle(5 + (p.noise(chaosTime * 2.0, 9) - 0.5) * 4, -5 + (p.noise(chaosTime * 2.0, 3) - 0.5) * 3, 4);
-    p.fill(255, 80, 180, 180);
-    p.circle(7, -7, 2 + 2 * pulse);
-  } else {
-    // default: your original infected glow behavior
-    if (corrupt < 0.35) {
-      p.fill(0);
-      p.circle(5, -5, 6);
-    } else {
-      const glow = p.constrain((corrupt - 0.35) / 0.65, 0, 1);
+    // eye: skin-driven
+    if (skin === 'evil') {
       p.noStroke();
-      p.fill(170, 255, 215, 120 * glow);
-      p.circle(5, -5, 14 * glow);
-      p.fill(10, 10, 10);
-      p.circle(5, -5, p.lerp(6, 3, glow));
-      p.fill(140, 255, 200, 220 * glow);
-      p.circle(5, -5, 5 * glow);
+      p.fill(255, 60, 60, 220);
+      p.circle(5, -5, 10);
+      p.fill(10, 0, 0);
+      p.circle(5, -5, 4);
+    } else if (skin === 'corrupt') {
+      const glow = p.constrain((corrupt - 0.15) / 0.85, 0, 1);
+      p.noStroke();
+      p.fill(120, 255, 220, 120 + 100 * glow);
+      p.circle(5, -5, 8 + 10 * glow);
+      p.fill(5, 10, 10);
+      p.circle(5, -5, 4);
+      p.fill(160, 255, 200, 220 * glow);
+      p.circle(6, -6, 3 + 2 * glow);
+    } else if (skin === 'chaotic') {
+      const pulse = 0.5 + 0.5 * p.sin(chaosTime * 9.0);
+      p.noStroke();
+      p.fill(255, 255, 255, 210);
+      p.circle(5, -5, 9 + 6 * pulse);
+      p.fill(0, 0, 0, 230);
+      p.circle(5 + (p.noise(chaosTime * 2.0, 9) - 0.5) * 4, -5 + (p.noise(chaosTime * 2.0, 3) - 0.5) * 3, 4);
+      p.fill(255, 80, 180, 180);
+      p.circle(7, -7, 2 + 2 * pulse);
+    } else {
+      // default: your original infected glow behavior
+      if (corrupt < 0.35) {
+        p.fill(0);
+        p.circle(5, -5, 6);
+      } else {
+        const glow = p.constrain((corrupt - 0.35) / 0.65, 0, 1);
+        p.noStroke();
+        p.fill(170, 255, 215, 120 * glow);
+        p.circle(5, -5, 14 * glow);
+        p.fill(10, 10, 10);
+        p.circle(5, -5, p.lerp(6, 3, glow));
+        p.fill(140, 255, 200, 220 * glow);
+        p.circle(5, -5, 5 * glow);
+      }
     }
-  }
 
-  // little face veins
+    // little face veins
     if (corrupt > 0.35) {
       p.stroke(35, 25, 70, 95 * corrupt);
       p.strokeWeight(2);
@@ -1472,7 +1547,7 @@ aliveTime = 0;
 
     p.pop(); // end head
 
-    // BODY VEINS (roots-like lines on chicken)
+    // BODY VEINS 
     if (corrupt > 0.25) {
       p.stroke(35, 25, 70, 85 * corrupt);
       p.strokeWeight(2);
@@ -1487,7 +1562,7 @@ aliveTime = 0;
       p.noStroke();
     }
 
-    // LEGS (unchanged look; slight discolor only)
+    // LEGS 
     p.stroke(p.lerpColor(p.color(200, 170, 60), p.color(140, 150, 150), corrupt * 0.7));
     p.strokeWeight(4);
 
@@ -1512,7 +1587,7 @@ aliveTime = 0;
     p.line(0, 32, 0, 42);
     p.pop();
 
-    // GLITCH LINES (keep your original chaos logic)
+    // GLITCH LINES
     if (chaos > 0.5) {
       p.stroke(0, 40);
       for (let i = 0; i < chaos * 10; i++) {
@@ -1541,72 +1616,72 @@ aliveTime = 0;
   }
 
   
-// ----------------------------
-// ACHIEVEMENTS PANEL (below hunger box)
-// ----------------------------
-function drawAchievementsPanel() {
-  const x = 14;
-  const y = 120;
-  const w = 300;
-  const headerH = 36;
-  const rowH = 32;
-  const pad = 10;
-  const h = achievementsOpen ? (headerH + pad + achievements.length * (rowH + 6) + 8) : headerH;
+  // ----------------------------
+  // SKINS PANEL (below hunger box)
+  // ----------------------------
+  function drawSkinsPanel() {
+    const x = 14;
+    const y = 120;
+    const w = 300;
+    const headerH = 36;
+    const rowH = 32;
+    const pad = 10;
+    const h = achievementsOpen ? (headerH + pad + achievements.length * (rowH + 6) + 8) : headerH;
 
-  drawPanel(x, y, w, h);
-
-  p.noStroke();
-  p.fill(255);
-  p.textAlign(p.LEFT, p.CENTER);
-  p.textSize(14);
-  p.text('SKINS', x + 14, y + headerH / 2);
-
-  p.textAlign(p.RIGHT, p.CENTER);
-  p.text(achievementsOpen ? '▼' : '►', x + w - 14, y + headerH / 2);
-
-  if (!achievementsOpen) return;
-
-  let yy = y + headerH + pad;
-  for (let i = 0; i < achievements.length; i++) {
-    const a = achievements[i];
-    const rx = x + 10;
-    const rw = w - 20;
-    const ry = yy + i * (rowH + 6);
+    drawPanel(x, y, w, h);
 
     p.noStroke();
-    if (a.equipped) p.fill(80, 25, 25, 210);
-    else if (a.unlocked) p.fill(35, 22, 22, 200);
-    else p.fill(20, 20, 24, 170);
-    p.rect(rx, ry, rw, rowH, 10);
-
-    p.noFill();
-    p.stroke(a.unlocked ? 255 : 140, a.unlocked ? 180 : 90);
-    p.strokeWeight(1.5);
-    p.rect(rx, ry, rw, rowH, 10);
-
-    p.noStroke();
-    p.fill(a.unlocked ? 255 : 160);
+    p.fill(255);
     p.textAlign(p.LEFT, p.CENTER);
-    p.textSize(12);
-    p.text(a.label, rx + 10, ry + rowH / 2);
+    p.textSize(14);
+    p.text('SKINS', x + 14, y + headerH / 2);
 
     p.textAlign(p.RIGHT, p.CENTER);
-    if (a.equipped) {
-      p.fill(255, 220);
-      p.text('CLICK TO UNEQUIP', rx + rw - 10, ry + rowH / 2);
-    } else if (a.unlocked) {
-      p.fill(210, 255, 210, 220);
-      p.text('CLICK TO EQUIP', rx + rw - 10, ry + rowH / 2);
-    } else {
-      const remaining = Math.max(0, a.time - aliveTime);
-      const mm = Math.floor(remaining / 60);
-      const ss = Math.floor(remaining % 60);
-      const s2 = ss < 10 ? ('0' + ss) : ('' + ss);
-      p.fill(255, 190);
-      p.text(mm + ':' + s2 + ' left', rx + rw - 10, ry + rowH / 2);
+    p.text(achievementsOpen ? '▼' : '►', x + w - 14, y + headerH / 2);
+
+    if (!achievementsOpen) return;
+
+    let yy = y + headerH + pad;
+    for (let i = 0; i < achievements.length; i++) {
+      const a = achievements[i];
+      const rx = x + 10;
+      const rw = w - 20;
+      const ry = yy + i * (rowH + 6);
+
+      p.noStroke();
+      if (a.equipped) p.fill(80, 25, 25, 210);
+      else if (a.unlocked) p.fill(35, 22, 22, 200);
+      else p.fill(20, 20, 24, 170);
+      p.rect(rx, ry, rw, rowH, 10);
+
+      p.noFill();
+      p.stroke(a.unlocked ? 255 : 140, a.unlocked ? 180 : 90);
+      p.strokeWeight(1.5);
+      p.rect(rx, ry, rw, rowH, 10);
+
+      p.noStroke();
+      p.fill(a.unlocked ? 255 : 160);
+      p.textAlign(p.LEFT, p.CENTER);
+      p.textSize(12);
+      p.text(a.label, rx + 10, ry + rowH / 2);
+
+      p.textAlign(p.RIGHT, p.CENTER);
+      if (a.equipped) {
+        p.fill(255, 220);
+        p.text('CLICK TO UNEQUIP', rx + rw - 10, ry + rowH / 2);
+      } else if (a.unlocked) {
+        p.fill(210, 255, 210, 220);
+        p.text('CLICK TO EQUIP', rx + rw - 10, ry + rowH / 2);
+      } else {
+        const remaining = Math.max(0, a.time - aliveTime);
+        const mm = Math.floor(remaining / 60);
+        const ss = Math.floor(remaining % 60);
+        const s2 = ss < 10 ? ('0' + ss) : ('' + ss);
+        p.fill(255, 190);
+        p.text(mm + ':' + s2 + ' left', rx + rw - 10, ry + rowH / 2);
+      }
     }
   }
-}
 function drawHUD() {
     // Hunger (top-left)
     drawPanel(14, 14, 300, 92);
@@ -1703,9 +1778,25 @@ function drawHUD() {
     const mmStr = (mm < 10) ? ("0" + mm) : ("" + mm);
     p.fill(255, 190);
     p.text("NZ " + hh + ":" + mmStr, p.width - 14 - 360 + 16, 92);
+
+    // Seed cooldown info
+    if (seedCount <= 0) {
+      const remain = Math.max(0, SEED_REFILL_DELAY - seedRefillTimer);
+      p.fill(255, 170, 170);
+      p.textSize(12);
+      p.text('Seeds regrow in ' + Math.ceil(remain) + 's', p.width - 14 - 360 + 16, 104);
+    }
+
+    // Startle info
+    if (startledTimer > 0) {
+      p.fill(255, 220);
+      p.textSize(12);
+      p.text('STARTLED!', p.width - 14 - 360 + 16, 116);
+    }
+
   
-  // Skins panel (below hunger)
-  drawAchievementsPanel();
+    // Skins panel (below hunger)
+    drawSkinsPanel();
 }
 
   function drawDraggedSeed() {
@@ -1773,6 +1864,8 @@ function drawHUD() {
   // ----------------------------
   p.draw = function () {
     const dt = p.deltaTime / 1000;
+    // mic startle (safe)
+    updateMicStartle(dt);
     chaosTime += 0.01;
 
     updateNZTime();
@@ -1787,11 +1880,25 @@ function drawHUD() {
     rate *= p.lerp(0.72, 1.0, nz.daylight);
     if (dragging) rate += DRAG_HUNGER_PER_SEC;
     if (isStormy()) rate *= 1.08;
+    // STARTLE: hunger spikes briefly
+    if (startledTimer > 0) rate *= STARTLE_HUNGER_MULT;
 
     if (respawning) {
       hunger = 0;
     } else {
       hunger = p.constrain(hunger + rate * dt, 0, 100);
+    }
+
+    // --- SEED REFILL LOGIC ---
+    if (seedCount <= 0) {
+      seedRefillTimer += dt;
+      if (seedRefillTimer >= SEED_REFILL_DELAY) {
+        seedCount = 1;
+        seedRefillTimer = 0;
+        saveState();
+      }
+    } else {
+      seedRefillTimer = 0;
     }
 
     // ---- ALIVE TIME TRACKING ----
@@ -1868,40 +1975,41 @@ function drawHUD() {
   // INTERACTION
   // ----------------------------
   p.mousePressed = function () {
-  // ---- ACHIEVEMENT PANEL CLICK ----
-  const apX = 14;
-  const apY = 120;
-  const apW = 300;
-  const headerH = 36;
+    // ---- SKINS PANEL CLICK ----
+    const apX = 14;
+    const apY = 120;
+    const apW = 300;
+    const headerH = 36;
 
-  // click header to expand/collapse
-  if (p.mouseX >= apX && p.mouseX <= apX + apW && p.mouseY >= apY && p.mouseY <= apY + headerH) {
-    achievementsOpen = !achievementsOpen;
-    return;
-  }
+    if (p.mouseX >= apX && p.mouseX <= apX + apW && p.mouseY >= apY && p.mouseY <= apY + headerH) {
+      achievementsOpen = !achievementsOpen;
+      return;
+    }
 
-  // click rows to equip/unequip (only if open)
-  if (achievementsOpen) {
-    const pad = 10;
-    const rowH = 32;
-    const startY = apY + headerH + pad;
-    for (let i = 0; i < achievements.length; i++) {
-      const ry = startY + i * (rowH + 6);
-      if (p.mouseX >= apX + 10 && p.mouseX <= apX + apW - 10 && p.mouseY >= ry && p.mouseY <= ry + rowH) {
-        const a = achievements[i];
-        if (a.unlocked) {
-          if (a.equipped) {
-            a.equipped = false;
-          } else {
-            for (const other of achievements) other.equipped = false;
-            a.equipped = true;
+    if (achievementsOpen) {
+      const pad = 10;
+      const rowH = 32;
+      const startY = apY + headerH + pad;
+      for (let i = 0; i < achievements.length; i++) {
+        const ry = startY + i * (rowH + 6);
+        if (p.mouseX >= apX + 10 && p.mouseX <= apX + apW - 10 && p.mouseY >= ry && p.mouseY <= ry + rowH) {
+          const a = achievements[i];
+          if (a.unlocked) {
+            if (a.equipped) {
+              a.equipped = false;
+            } else {
+              for (const other of achievements) other.equipped = false;
+              a.equipped = true;
+            }
+            saveState();
           }
-          saveState();
+          return;
         }
-        return;
       }
     }
-  }
+
+    // Start mic on first user gesture (safe; no crash if blocked)
+    if (!micAnalyser && !micStarting) initMicSafe();
 
     const pos = seedIconPos();
 
