@@ -155,6 +155,30 @@ new p5(function (p) {
     precip: 0
   };
 
+// ============================
+// ACHIEVEMENTS / SKINS (evil themed)
+// Survive: 5m, 15m, 1h (set to 0 while testing). Click unlocked to equip; click again to unequip.
+// Saved in localStorage.
+// ============================
+let aliveTime = 0; // seconds alive since last respawn
+let achievementsOpen = false;
+
+const achievements = [
+  { id: 'evil',    label: 'Evil Skin',    time: 300, unlocked: false, equipped: false },
+  { id: 'corrupt', label: 'Corrupt Skin', time: 900, unlocked: false, equipped: false },
+  { id: 'chaotic', label: 'Chaotic Skin', time: 3600, unlocked: false, equipped: false }
+];
+
+function equippedAchievement() {
+  for (const a of achievements) if (a.equipped) return a;
+  return null;
+}
+
+function activeSkin() {
+  const a = equippedAchievement();
+  return a ? a.id : 'normal';
+}
+
   // ----------------------------
   // HELPERS
   // ----------------------------
@@ -625,6 +649,8 @@ function sampleCorr01(x, y) {
     try {
       const data = {
         t: Date.now(),
+  aliveTime,
+  achievements: achievements.map(a => ({ id: a.id, unlocked: a.unlocked, equipped: a.equipped })),
         hunger,
         seedCount,
         creature: {
@@ -667,6 +693,17 @@ function sampleCorr01(x, y) {
 
       if (typeof data.hunger === "number") hunger = data.hunger;
       if (typeof data.seedCount === "number") seedCount = data.seedCount;
+
+if (typeof data.aliveTime === 'number') aliveTime = data.aliveTime;
+if (Array.isArray(data.achievements)) {
+  for (const a of achievements) {
+    const s = data.achievements.find(o => o.id === a.id);
+    if (s) {
+      a.unlocked = !!s.unlocked;
+      a.equipped = !!s.equipped;
+    }
+  }
+}
 
       if (data.creature) {
         if (typeof data.creature.x === "number") creature.x = data.creature.x;
@@ -1244,6 +1281,7 @@ function sampleCorr01(x, y) {
     creature.facing = p.random() < 0.5 ? -1 : 1;
 
     hunger = 0;
+aliveTime = 0;
     overloadTimer = 0;
     overloadLevel = 0;
 
@@ -1283,7 +1321,14 @@ function sampleCorr01(x, y) {
 
     // world corruption under chicken + hunger
     const groundCorrupt = sampleCorr01(c.x, c.y);
-    const corrupt = p.constrain(Math.max(groundCorrupt, chaos), 0, 1);
+    let corrupt = p.constrain(Math.max(groundCorrupt, chaos), 0, 1);
+  const skin = activeSkin();
+  if (skin === 'corrupt') corrupt = p.constrain(corrupt + 0.28, 0, 1);
+  if (skin === 'evil') corrupt = p.constrain(corrupt + 0.12, 0, 1);
+  if (skin === 'chaotic') {
+    corrupt = p.constrain(corrupt + 0.18, 0, 1);
+    chaos = p.constrain(chaos + 0.35, 0, 1);
+  }
 
     // keep your original style: corruption changes are smooth + layered
     const shapeChaos = p.constrain(chaos * 0.85 + corrupt * 0.35, 0, 1);
@@ -1297,10 +1342,31 @@ function sampleCorr01(x, y) {
     p.scale(c.facing, 1);
 
     // color shift: warm -> sickly/ashy
-    const baseBodyA = p.color(220, 170, 80);
-    const baseBodyB = p.color(235, 195, 120);
-    const sickBodyA = p.color(145, 175, 135);
-    const sickBodyB = p.color(120, 150, 160);
+    let baseBodyA = p.color(220, 170, 80);
+  let baseBodyB = p.color(235, 195, 120);
+  let sickBodyA = p.color(145, 175, 135);
+  let sickBodyB = p.color(120, 150, 160);
+
+  // SKIN PALETTES
+  if (skin === 'evil') {
+    baseBodyA = p.color(115, 25, 35);
+    baseBodyB = p.color(165, 45, 60);
+    sickBodyA = p.color(70, 15, 40);
+    sickBodyB = p.color(95, 25, 70);
+  } else if (skin === 'corrupt') {
+    baseBodyA = p.color(80, 130, 105);
+    baseBodyB = p.color(60, 110, 125);
+    sickBodyA = p.color(55, 150, 120);
+    sickBodyB = p.color(45, 120, 145);
+  } else if (skin === 'chaotic') {
+    const r = 140 + (p.noise(chaosTime * 0.9, 1) - 0.5) * 220;
+    const g = 140 + (p.noise(chaosTime * 0.9, 7) - 0.5) * 220;
+    const b = 140 + (p.noise(chaosTime * 0.9, 13) - 0.5) * 220;
+    baseBodyA = p.color(r, g, b);
+    baseBodyB = p.color(255 - r * 0.4, 255 - g * 0.4, 255 - b * 0.4);
+    sickBodyA = p.color(b, r, g);
+    sickBodyB = p.color(g, b, r);
+  }
 
     const colA = p.lerpColor(baseBodyA, sickBodyA, corrupt * 0.75);
     const colB = p.lerpColor(baseBodyB, sickBodyB, corrupt * 0.75);
@@ -1351,8 +1417,33 @@ function sampleCorr01(x, y) {
     // beak dulls
     p.fill(p.lerpColor(p.color(245, 200, 60), p.color(160, 165, 120), corrupt * 0.85));
     p.triangle(35, 0, 70, 8, 35, 15);
-
-    // eye: turns “infected glow”
+  // eye: skin-driven
+  if (skin === 'evil') {
+    p.noStroke();
+    p.fill(255, 60, 60, 220);
+    p.circle(5, -5, 10);
+    p.fill(10, 0, 0);
+    p.circle(5, -5, 4);
+  } else if (skin === 'corrupt') {
+    const glow = p.constrain((corrupt - 0.15) / 0.85, 0, 1);
+    p.noStroke();
+    p.fill(120, 255, 220, 120 + 100 * glow);
+    p.circle(5, -5, 8 + 10 * glow);
+    p.fill(5, 10, 10);
+    p.circle(5, -5, 4);
+    p.fill(160, 255, 200, 220 * glow);
+    p.circle(6, -6, 3 + 2 * glow);
+  } else if (skin === 'chaotic') {
+    const pulse = 0.5 + 0.5 * p.sin(chaosTime * 9.0);
+    p.noStroke();
+    p.fill(255, 255, 255, 210);
+    p.circle(5, -5, 9 + 6 * pulse);
+    p.fill(0, 0, 0, 230);
+    p.circle(5 + (p.noise(chaosTime * 2.0, 9) - 0.5) * 4, -5 + (p.noise(chaosTime * 2.0, 3) - 0.5) * 3, 4);
+    p.fill(255, 80, 180, 180);
+    p.circle(7, -7, 2 + 2 * pulse);
+  } else {
+    // default: your original infected glow behavior
     if (corrupt < 0.35) {
       p.fill(0);
       p.circle(5, -5, 6);
@@ -1366,8 +1457,9 @@ function sampleCorr01(x, y) {
       p.fill(140, 255, 200, 220 * glow);
       p.circle(5, -5, 5 * glow);
     }
+  }
 
-    // little face veins
+  // little face veins
     if (corrupt > 0.35) {
       p.stroke(35, 25, 70, 95 * corrupt);
       p.strokeWeight(2);
@@ -1448,7 +1540,74 @@ function sampleCorr01(x, y) {
     return { x: p.width - 92, y: 42 };
   }
 
-  function drawHUD() {
+  
+// ----------------------------
+// ACHIEVEMENTS PANEL (below hunger box)
+// ----------------------------
+function drawAchievementsPanel() {
+  const x = 14;
+  const y = 120;
+  const w = 300;
+  const headerH = 36;
+  const rowH = 32;
+  const pad = 10;
+  const h = achievementsOpen ? (headerH + pad + achievements.length * (rowH + 6) + 8) : headerH;
+
+  drawPanel(x, y, w, h);
+
+  p.noStroke();
+  p.fill(255);
+  p.textAlign(p.LEFT, p.CENTER);
+  p.textSize(14);
+  p.text('SKINS', x + 14, y + headerH / 2);
+
+  p.textAlign(p.RIGHT, p.CENTER);
+  p.text(achievementsOpen ? '▼' : '►', x + w - 14, y + headerH / 2);
+
+  if (!achievementsOpen) return;
+
+  let yy = y + headerH + pad;
+  for (let i = 0; i < achievements.length; i++) {
+    const a = achievements[i];
+    const rx = x + 10;
+    const rw = w - 20;
+    const ry = yy + i * (rowH + 6);
+
+    p.noStroke();
+    if (a.equipped) p.fill(80, 25, 25, 210);
+    else if (a.unlocked) p.fill(35, 22, 22, 200);
+    else p.fill(20, 20, 24, 170);
+    p.rect(rx, ry, rw, rowH, 10);
+
+    p.noFill();
+    p.stroke(a.unlocked ? 255 : 140, a.unlocked ? 180 : 90);
+    p.strokeWeight(1.5);
+    p.rect(rx, ry, rw, rowH, 10);
+
+    p.noStroke();
+    p.fill(a.unlocked ? 255 : 160);
+    p.textAlign(p.LEFT, p.CENTER);
+    p.textSize(12);
+    p.text(a.label, rx + 10, ry + rowH / 2);
+
+    p.textAlign(p.RIGHT, p.CENTER);
+    if (a.equipped) {
+      p.fill(255, 220);
+      p.text('CLICK TO UNEQUIP', rx + rw - 10, ry + rowH / 2);
+    } else if (a.unlocked) {
+      p.fill(210, 255, 210, 220);
+      p.text('CLICK TO EQUIP', rx + rw - 10, ry + rowH / 2);
+    } else {
+      const remaining = Math.max(0, a.time - aliveTime);
+      const mm = Math.floor(remaining / 60);
+      const ss = Math.floor(remaining % 60);
+      const s2 = ss < 10 ? ('0' + ss) : ('' + ss);
+      p.fill(255, 190);
+      p.text(mm + ':' + s2 + ' left', rx + rw - 10, ry + rowH / 2);
+    }
+  }
+}
+function drawHUD() {
     // Hunger (top-left)
     drawPanel(14, 14, 300, 92);
 
@@ -1544,7 +1703,10 @@ function sampleCorr01(x, y) {
     const mmStr = (mm < 10) ? ("0" + mm) : ("" + mm);
     p.fill(255, 190);
     p.text("NZ " + hh + ":" + mmStr, p.width - 14 - 360 + 16, 92);
-  }
+  
+  // Skins panel (below hunger)
+  drawAchievementsPanel();
+}
 
   function drawDraggedSeed() {
     p.push();
@@ -1632,6 +1794,20 @@ function sampleCorr01(x, y) {
       hunger = p.constrain(hunger + rate * dt, 0, 100);
     }
 
+    // ---- ALIVE TIME TRACKING ----
+    if (!respawning) {
+      aliveTime += dt;
+    }
+
+    // ---- ACHIEVEMENT CHECK ----
+    for (const a of achievements) {
+      if (!a.unlocked && aliveTime >= a.time) {
+        a.unlocked = true;
+        saveState();
+      }
+    }
+
+
     // ---- OVERLOAD TIMELINE ----
     if (!respawning) {
       if (hunger >= 100) {
@@ -1692,6 +1868,41 @@ function sampleCorr01(x, y) {
   // INTERACTION
   // ----------------------------
   p.mousePressed = function () {
+  // ---- ACHIEVEMENT PANEL CLICK ----
+  const apX = 14;
+  const apY = 120;
+  const apW = 300;
+  const headerH = 36;
+
+  // click header to expand/collapse
+  if (p.mouseX >= apX && p.mouseX <= apX + apW && p.mouseY >= apY && p.mouseY <= apY + headerH) {
+    achievementsOpen = !achievementsOpen;
+    return;
+  }
+
+  // click rows to equip/unequip (only if open)
+  if (achievementsOpen) {
+    const pad = 10;
+    const rowH = 32;
+    const startY = apY + headerH + pad;
+    for (let i = 0; i < achievements.length; i++) {
+      const ry = startY + i * (rowH + 6);
+      if (p.mouseX >= apX + 10 && p.mouseX <= apX + apW - 10 && p.mouseY >= ry && p.mouseY <= ry + rowH) {
+        const a = achievements[i];
+        if (a.unlocked) {
+          if (a.equipped) {
+            a.equipped = false;
+          } else {
+            for (const other of achievements) other.equipped = false;
+            a.equipped = true;
+          }
+          saveState();
+        }
+        return;
+      }
+    }
+  }
+
     const pos = seedIconPos();
 
     if (seedCount > 0 && p.dist(p.mouseX, p.mouseY, pos.x, pos.y) < 28) {
